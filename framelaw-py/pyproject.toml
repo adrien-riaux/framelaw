@@ -1,0 +1,61 @@
+[project]
+name = "framelaw"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "Native Rust schema contracts, built for Polars"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "polars>=0.20.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "interrogate>=1.7",
+    "ty",
+    "maturin>=1.5"
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "framelaw._framelaw"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "D", "I", "N", "UP", "ANN", "B"]
+ignore = ["D100", "D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.interrogate]
+ignore-init-method = true
+ignore-init-module = true
+ignore-magic = false
+ignore-semiprivate = false
+ignore-private = false
+ignore-property-decorators = false
+ignore-module = false
+ignore-nested-functions = false
+ignore-nested-classes = true
+ignore-setters = false
+fail-under = 95
+exclude = ["setup.py", "docs", "build"]
+verbose = 0
+quiet = false
+color = true
+
+[build-system]
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
