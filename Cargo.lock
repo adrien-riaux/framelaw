@@ -452,6 +452,7 @@ version = "0.1.0"
 dependencies = [
  "jiter",
  "polars 0.41.3",
+ "polars-ops",
  "rayon",
  "regex",
 ]
