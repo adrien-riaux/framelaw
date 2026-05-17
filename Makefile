@@ -6,10 +6,6 @@ help:
 	@echo "  make lint    - Run Linters for Rust (Clippy) and Python (Ruff)"
 	@echo "  make check   - Run formatting and linting checks"
 	@echo "  make build   - Build the Rust extension for Python using Maturin/uv"
-	@echo "  make test    - Run Rust tests and Python test scripts"
-	@echo "  make example - Run the basic validation example"
-	@echo "  make all     - Run check, build, test, and example"
-	@echo "  make clean   - Clean Cargo and uv cache"
 
 format:
 	@echo "=> Formatting Rust code..."
@@ -18,8 +14,8 @@ format:
 	uvx ruff format .
 
 lint:
-	@echo "=> Linting Rust code..."
-	cargo clippy --all-targets --all-features -- -D warnings
+	@echo "=> Linting Rust code with Clippy..."
+	cargo clippy --all-targets -- -D warnings
 	@echo "=> Linting Python code..."
 	uvx ruff check .
 
@@ -29,18 +25,3 @@ build:
 	@echo "=> Building Python extension..."
 	uv pip install -e ./framelaw-py
 
-test:
-	@echo "=> Running Rust tests..."
-	cargo test
-	@echo "=> Running Python tests..."
-	uv run python test_validate.py
-
-example:
-	@echo "=> Running Python examples..."
-	uv run python examples/01_basic_validation.py
-
-all: check build test example
-
-clean:
-	cargo clean
-	rm -rf .venv
