@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-polars = { version = "0.41", default-features = false, features = ["lazy", "strings", "regex"] }
+polars = { version = "0.41", default-features = false, features = ["lazy", "strings", "regex", "is_unique"] }
 rayon = "1.10.0"
 regex = "1.10.4"
 jiter = "0.5"
+polars-ops = "0.41"

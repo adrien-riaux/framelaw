@@ -1,6 +1,6 @@
-use polars::prelude::{DataFrame, DataType};
 use crate::checks::Check;
 use crate::errors::ValidationError;
+use polars::prelude::{DataFrame, DataType};
 
 pub struct ColumnSpec {
     pub name: String,
@@ -12,7 +12,7 @@ pub struct ColumnSpec {
 impl ColumnSpec {
     pub fn validate(&self, df: &DataFrame) -> Vec<ValidationError> {
         let mut errors = Vec::new();
-        
+
         let series = match df.column(&self.name) {
             Ok(s) => s,
             Err(_) => {

@@ -3,11 +3,11 @@ use rayon::prelude::*;
 use regex::Regex;
 use std::collections::HashSet;
 
-use crate::column::ColumnSpec;
-use crate::schema::Schema;
 use crate::checks::{
     Check, GreaterThanF64, LessThanF64, MatchesRegex, NotNull, OneOfString, UniqueValues,
 };
+use crate::column::ColumnSpec;
+use crate::schema::Schema;
 
 /// Infer a `Schema` from an existing Polars `DataFrame`.
 /// Computes stats concurrently across all columns using Rayon.
@@ -86,7 +86,12 @@ fn infer_series_schema(series: &Series) -> ColumnSpec {
                     } else {
                         let is_email = sample.iter().all(|s| s.contains('@') && s.contains('.'));
                         if is_email {
-                            checks.push(Box::new(MatchesRegex { pattern: Regex::new(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$").unwrap() }));
+                            checks.push(Box::new(MatchesRegex {
+                                pattern: Regex::new(
+                                    r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$",
+                                )
+                                .unwrap(),
+                            }));
                         }
                     }
                 }
