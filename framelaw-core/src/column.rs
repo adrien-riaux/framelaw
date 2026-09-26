@@ -2,7 +2,6 @@ use polars::prelude::{DataFrame, DataType};
 
 use crate::checks::Check;
 use crate::errors::ValidationError;
-use polars::prelude::{DataFrame, DataType};
 
 pub struct ColumnSpec {
     pub name: String,
