@@ -1,5 +1,4 @@
 use polars::prelude::*;
-use rayon::prelude::*;
 use regex::Regex;
 use std::collections::HashSet;
 
@@ -13,9 +12,9 @@ use crate::schema::Schema;
 /// Computes stats concurrently across all columns using Rayon.
 pub fn infer_schema(df: &DataFrame) -> Schema {
     let columns: Vec<ColumnSpec> = df
-        .get_columns()
-        .par_iter()
-        .map(|series| infer_series_schema(series))
+        .columns()
+        .iter()
+        .map(|column| infer_series_schema(column.as_materialized_series()))
         .collect();
 
     Schema::new(columns)
@@ -67,7 +66,7 @@ fn infer_series_schema(series: &Series) -> ColumnSpec {
             // Heuristic for Enum / Categorical: If few unique values relative to length
             if n_unique > 0 && n_unique <= 10 && len > n_unique {
                 let mut unique_vals = HashSet::new();
-                for val in str_ca.into_iter().flatten() {
+                for val in str_ca.iter().flatten() {
                     unique_vals.insert(val.to_string());
                 }
                 checks.push(Box::new(OneOfString {
@@ -77,7 +76,7 @@ fn infer_series_schema(series: &Series) -> ColumnSpec {
                 // Heuristics for Strings formats using regex patterns.
                 // We'll perform a quick scan on a sample of non-null values.
                 let sample_size = std::cmp::min(100, len);
-                let sample: Vec<&str> = str_ca.into_iter().flatten().take(sample_size).collect();
+                let sample: Vec<&str> = str_ca.iter().flatten().take(sample_size).collect();
 
                 if !sample.is_empty() {
                     let is_uuid = sample.iter().all(|s| s.len() == 36 && s.contains('-')); // basic UUID heuristic

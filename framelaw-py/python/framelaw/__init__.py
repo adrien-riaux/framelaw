@@ -4,7 +4,7 @@ This module provides the main entrypoint for defining schemas
 and validating Polars DataFrames using high-performance Rust logic.
 """
 
-from framelaw.framelaw import (
+from ._framelaw import (
     Check,
     Column,
     Schema,
@@ -12,8 +12,11 @@ from framelaw.framelaw import (
     gt,
     is_in,
     lt,
+    matches,
     matches_regex,
     not_null,
+    one_of,
+    unique,
     unique_values,
 )
 
@@ -26,6 +29,9 @@ __all__ = [
     "gt",
     "lt",
     "between",
+    "matches",
     "matches_regex",
+    "one_of",
     "is_in",
+    "unique",
 ]

@@ -25,3 +25,16 @@ build:
 	@echo "=> Building Python extension..."
 	uv pip install -e ./framelaw-py
 
+test:
+	@echo "=> Running Rust tests..."
+	cargo test
+
+example:
+	@echo "=> Installing the package and running Python examples..."
+	uv run --with-editable ./framelaw-py python examples/basic_validation.py
+
+all: check build test
+
+clean:
+	cargo clean
+	rm -rf .venv
