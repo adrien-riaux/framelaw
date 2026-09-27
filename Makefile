@@ -1,11 +1,24 @@
-.PHONY: help format lint check build test example all clean
+.PHONY: help format lint lint-py typecheck docstyle lint-all check build wheel publish test examples ci all clean
 
 help:
 	@echo "Available commands:"
-	@echo "  make format  - Auto-format Rust and Python code"
-	@echo "  make lint    - Run Linters for Rust (Clippy) and Python (Ruff)"
-	@echo "  make check   - Run formatting and linting checks"
-	@echo "  make build   - Build the Rust extension for Python using Maturin/uv"
+	@echo "  make format     - Auto-format Rust and Python code"
+	@echo "  make lint       - Clippy (Rust) + ruff check (Python)"
+	@echo "  make lint-py    - ruff check + ruff format check (verify only)"
+	@echo "  make typecheck  - Type-check Python with ty"
+	@echo "  make docstyle   - Docstring coverage with interrogate"
+	@echo "  make lint-all   - All linters: clippy, ruff, ty, interrogate"
+	@echo "  make check      - Verify-only gate (same as lint-all)"
+	@echo "  make build      - Build the Rust extension, editable debug install"
+	@echo "  make build-release - Rebuild the extension optimized (--release)"
+	@echo "  make wheel      - Release wheel + sdist into ./dist"
+	@echo "  make publish    - Upload ./dist to TestPyPI (PYPI_URL=... to override)"
+	@echo "  make test       - Rust + Python test suites"
+	@echo "  make example    - Run the basic example"
+	@echo "  make examples   - Run every example script"
+	@echo "  make ci         - Full gate: lint-all, build, test, examples"
+	@echo "  make all        - check, build, test"
+	@echo "  make clean      - Clean the build artifacts"
 
 format:
 	@echo "=> Formatting Rust code..."
@@ -19,22 +32,63 @@ lint:
 	@echo "=> Linting Python code..."
 	uvx ruff check .
 
-check: format lint
+lint-py:
+	@echo "=> Checking Python lint + format..."
+	uvx ruff check .
+	uvx ruff format --check .
+
+typecheck:
+	@echo "=> Type-checking Python code with ty..."
+	uv run --with ty ty check framelaw-py/python examples
+
+docstyle:
+	@echo "=> Checking docstring coverage with interrogate..."
+	uvx interrogate framelaw-py/python examples
+
+lint-all: lint typecheck docstyle
+
+check: lint-all
 
 build:
-	@echo "=> Building Python extension..."
+	@echo "=> Building Python extension (debug)..."
 	uv pip install -e ./framelaw-py
+
+build-release:
+	@echo "=> Building optimized release extension..."
+	VIRTUAL_ENV=$${VIRTUAL_ENV:-$$(pwd)/.venv} uvx maturin develop --release --manifest-path framelaw-py/Cargo.toml
+
+wheel:
+	@echo "=> Building release wheel + sdist into ./dist..."
+	uvx maturin build --release --manifest-path framelaw-py/Cargo.toml --out dist
+
+publish: wheel
+	@echo "=> Uploading ./dist (default: TestPyPI)..."
+	uvx twine upload --repository-url $${PYPI_URL:-https://test.pypi.org/legacy/} dist/*
 
 test:
 	@echo "=> Running Rust tests..."
-	cargo test
+	cargo test -p framelaw-core
+	@echo "=> Running Python tests..."
+	uv run --with-editable ./framelaw-py pytest framelaw-py/tests -q
 
 example:
-	@echo "=> Installing the package and running Python examples..."
+	@echo "=> Running basic example..."
 	uv run --with-editable ./framelaw-py python examples/basic_validation.py
+
+examples:
+	@echo "=> Running all examples..."
+	uv run --with-editable ./framelaw-py python examples/basic_validation.py
+	uv run --with-editable ./framelaw-py python examples/infer_schema.py
+	uv run --with-editable ./framelaw-py python examples/pydantic_model.py
+	uv run --with-editable ./framelaw-py python examples/error_report.py
+	uv run --with-editable ./framelaw-py python examples/cross_column_nested.py
+	uv run --with-editable ./framelaw-py python examples/lazy_sampling.py
+	uv run --with-editable ./framelaw-py python examples/generate_data.py
+
+ci: lint-all build test examples
 
 all: check build test
 
 clean:
 	cargo clean
-	rm -rf .venv
+	rm -rf .venv dist
