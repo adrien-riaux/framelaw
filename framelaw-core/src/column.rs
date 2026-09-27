@@ -17,28 +17,29 @@ impl ColumnSpec {
         let series = match df.column(&self.name) {
             Ok(column) => column.as_materialized_series(),
             Err(_) => {
-                errors.push(ValidationError {
-                    column: self.name.clone(),
-                    check: "ColumnExists".to_string(),
-                    rows: vec![],
-                    message: format!("Column '{}' is missing from DataFrame", self.name),
-                });
+                errors.push(ValidationError::single(
+                    &self.name,
+                    "ColumnExists",
+                    vec![],
+                    format!("Column '{}' is missing from DataFrame", self.name),
+                ));
                 return errors;
             }
         };
 
-        if self.dtype != *series.dtype() {
-            errors.push(ValidationError {
-                column: self.name.clone(),
-                check: "Dtype".to_string(),
-                rows: vec![],
-                message: format!(
+        let null_column_is_compatible = self.nullable && *series.dtype() == DataType::Null;
+        if !dtype_matches(&self.dtype, series.dtype()) && !null_column_is_compatible {
+            errors.push(ValidationError::single(
+                &self.name,
+                "Dtype",
+                vec![],
+                format!(
                     "Column '{}' has dtype {}, expected {}",
                     self.name,
                     series.dtype(),
                     self.dtype
                 ),
-            });
+            ));
             return errors;
         }
 
@@ -50,16 +51,20 @@ impl ColumnSpec {
                 .filter_map(|(index, value)| value.filter(|is_null| *is_null).map(|_| index))
                 .collect();
 
-            errors.push(ValidationError {
-                column: self.name.clone(),
-                check: "NotNull".to_string(),
+            errors.push(ValidationError::single(
+                &self.name,
+                "NotNull",
                 rows,
-                message: format!(
+                format!(
                     "Found {} null values in '{}'",
                     series.null_count(),
                     self.name
                 ),
-            });
+            ));
+        }
+
+        if null_column_is_compatible {
+            return errors;
         }
 
         // Run all individual checks against the series
@@ -73,6 +78,29 @@ impl ColumnSpec {
         }
 
         errors
+    }
+}
+
+/// Structural dtype comparison supporting nested List/Struct/Array.
+/// Scalar dtypes require exact equality; nested dtypes recurse into
+/// inner types so `List(Int32)` does not silently accept `List(String)`.
+pub fn dtype_matches(expected: &DataType, actual: &DataType) -> bool {
+    match (expected, actual) {
+        (DataType::List(expected_inner), DataType::List(actual_inner)) => {
+            dtype_matches(expected_inner, actual_inner)
+        }
+        (
+            DataType::Array(expected_inner, expected_width),
+            DataType::Array(actual_inner, actual_width),
+        ) => expected_width == actual_width && dtype_matches(expected_inner, actual_inner),
+        (DataType::Struct(expected_fields), DataType::Struct(actual_fields)) => {
+            expected_fields.len() == actual_fields.len()
+                && expected_fields
+                    .iter()
+                    .zip(actual_fields.iter())
+                    .all(|(e, a)| e.name == a.name && dtype_matches(&e.dtype, &a.dtype))
+        }
+        (expected, actual) => expected == actual,
     }
 }
 
@@ -118,5 +146,19 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].check, "NotNull");
         assert_eq!(errors[0].rows, vec![1]);
+    }
+
+    #[test]
+    fn nested_dtypes_match_structurally() {
+        let list_i64 = DataType::List(Box::new(DataType::Int64));
+        let list_str = DataType::List(Box::new(DataType::String));
+        assert!(dtype_matches(&list_i64, &list_i64));
+        assert!(!dtype_matches(&list_i64, &list_str));
+        assert!(!dtype_matches(&list_i64, &DataType::Int64));
+
+        let array_a = DataType::Array(Box::new(DataType::Int64), 2);
+        let array_b = DataType::Array(Box::new(DataType::Int64), 3);
+        assert!(dtype_matches(&array_a, &array_a));
+        assert!(!dtype_matches(&array_a, &array_b));
     }
 }
