@@ -1,0 +1,69 @@
+# Architecture
+
+FrameLaw is a Cargo workspace with a strict separation between the pure-Rust
+engine and the Python bindings.
+
+## Crates
+
+```text
+framelaw/
+├── framelaw-core/   # pure Rust: no Python/PyO3 types allowed
+│   └── src/
+│       ├── schema.rs            # Schema + validate() orchestration
+│       ├── column.rs            # ColumnSpec: name, dtype, nullable, checks
+│       ├── checks.rs            # Check trait + built-in checks
+│       ├── dataframe_checks.rs  # DataFrameCheck trait + table checks
+│       ├── inference.rs         # schema inference from a live DataFrame
+│       ├── generate.rs          # valid-data sampling from a schema
+│       └── errors.rs            # ValidationError / ValidationReport
+└── framelaw-py/     # PyO3 bindings + Python package
+    ├── src/lib.rs               # module entry point, JSON, Pydantic ingest
+    └── python/framelaw/         # public Python surface (re-exports)
+```
+
+**Rule:** `framelaw-core` must never import PyO3 types (`PyResult`,
+`PyAny`, …). All Python concerns live in `framelaw-py`.
+
+## Key technologies
+
+| Concern | Technology |
+|---|---|
+| Data engine | `polars` — validation runs on native columnar memory |
+| Concurrency | `rayon` — parallel validation across columns and table checks |
+| Regex | `regex` crate, validated eagerly at check construction |
+| Schema JSON | `serde` + `serde_json` parsing, `jiter` pre-validation |
+| Python bindings | `pyo3` + `pyo3-polars` (zero-copy frame/dtype exchange) |
+| Sampling RNG | `rand` / `rand_chacha` (seeded, reproducible) |
+| Build | `maturin` via `uv pip install -e ./framelaw-py` |
+
+## Design notes
+
+- **Checks are declarative values**, not closures: every rule is data
+  (`CheckSpec`), which is what makes JSON serialization, inference output,
+  and Pydantic derivation interchangeable representations of the same schema.
+- **Errors are data**: validation collects `ValidationError`s rather than
+  short-circuiting, so one pass reports every problem.
+- **Raising is a Python-layer concern**: the Rust core always returns a
+  `ValidationReport`; `ValueError` is raised (or not) in the bindings.
+- **Pydantic ingest reads `__pydantic_core_schema__`** natively instead of
+  reflecting over Python objects.
+
+## Development
+
+```bash
+make build          # editable debug install (fast iteration)
+make build-release  # optimized --release install (benchmarks, profiling)
+make test           # cargo tests + pytest suite
+make lint-all       # clippy, ruff, ty, interrogate
+make ci             # full gate: lint-all, build, test, all examples
+make examples       # run every example script
+```
+
+Editable installs build Rust in **debug** mode: fast to compile, slow to
+run. Published wheels (`make wheel`, CI) always use `--release`. Never
+quote benchmark numbers from a debug build — run `make build-release`
+first (see `examples/benchmark.py`).
+
+Rust code follows `rustfmt` + strict `clippy`; Python follows `ruff`.
+Core logic carries Rust unit tests in each module; the public API is covered
+by `pytest` in `framelaw-py/tests/`.
