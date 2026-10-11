@@ -24,7 +24,7 @@ make test    # confirm green before changing anything
 4. Update the user-facing surface alongside the code: `docs/` pages,
    `docs/api-reference.md`, `framelaw-py/python/framelaw/_framelaw.pyi`
    (native signatures), and `CHANGELOG.md` (newest entry on top).
-5. Run `make ci` locally. Open a PR against `dev`; CI runs the same gate
+5. Run `make lint`, `make test`, and `make examples` locally. Open a PR against `dev`; CI runs the same gate
    plus the Python 3.10–3.14 matrix.
 
 ## Standards

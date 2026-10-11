@@ -54,8 +54,8 @@ framelaw/
 make build          # editable debug install (fast iteration)
 make build-release  # optimized --release install (benchmarks, profiling)
 make test           # cargo tests + pytest suite
-make lint-all       # clippy, ruff, ty, interrogate
-make ci             # full gate: lint-all, build, test, all examples
+make lint          # full verify: clippy, ruff, ty, interrogate
+make test          # Rust + Python suites, then make examples
 make examples       # run every example script
 ```
 

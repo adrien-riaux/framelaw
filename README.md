@@ -77,8 +77,8 @@ reference, runnable examples, and architecture notes.
 ```bash
 make build   # editable debug install
 make test    # Rust + Python suites
-make lint-all  # clippy, ruff, ty, interrogate
-make ci      # full gate: lint-all, build, test, all examples
+make lint    # clippy, ruff, ty, interrogate
+make test    # Rust + Python suites, then make examples
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full contributor workflow.

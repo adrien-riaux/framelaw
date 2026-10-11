@@ -45,8 +45,8 @@ Module map (`framelaw-core/src`):
 - `make build` — build + install the extension (`uv pip install -e ./framelaw-py`, debug).
 - `make build-release` — optimized `--release` install for benchmarks.
 - `make test` — `cargo test -p framelaw-core` + pytest suite.
-- `make lint-all` — clippy, ruff, `ty`, interrogate.
-- `make ci` — full gate: lint-all, build, test, all examples.
+- `make lint` — full verify: clippy, ruff, `ty`, interrogate.
+- `make test` — Rust + Python suites; `make examples` runs every example.
 - `make wheel` / `make publish` — release wheel build / TestPyPI upload.
 
 **References**
