@@ -1,4 +1,4 @@
-.PHONY: help format lint lint-py typecheck docstyle lint-all check build wheel publish test examples ci all clean
+.PHONY: help format lint lint-py typecheck docstyle lint-all check build build-release wheel publish test test-rust test-py example examples benchmark ci all clean
 
 help:
 	@echo "Available commands:"
@@ -13,8 +13,9 @@ help:
 	@echo "  make build-release - Rebuild the extension optimized (--release)"
 	@echo "  make wheel      - Release wheel + sdist into ./dist"
 	@echo "  make publish    - Upload ./dist to TestPyPI (PYPI_URL=... to override)"
-	@echo "  make test       - Rust + Python test suites"
+	@echo "  make test       - Rust + Python test suites (test-rust, test-py)"
 	@echo "  make example    - Run the basic example"
+	@echo "  make benchmark  - Run the throughput benchmark"
 	@echo "  make examples   - Run every example script"
 	@echo "  make ci         - Full gate: lint-all, build, test, examples"
 	@echo "  make all        - check, build, test"
@@ -30,12 +31,12 @@ lint:
 	@echo "=> Linting Rust code with Clippy..."
 	cargo clippy --all-targets -- -D warnings
 	@echo "=> Linting Python code..."
-	uvx ruff check .
+	uvx ruff check framelaw-py examples
 
 lint-py:
 	@echo "=> Checking Python lint + format..."
-	uvx ruff check .
-	uvx ruff format --check .
+	uvx ruff check framelaw-py examples
+	uvx ruff format --check framelaw-py examples
 
 typecheck:
 	@echo "=> Type-checking Python code with ty..."
@@ -65,15 +66,23 @@ publish: wheel
 	@echo "=> Uploading ./dist (default: TestPyPI)..."
 	uvx twine upload --repository-url $${PYPI_URL:-https://test.pypi.org/legacy/} dist/*
 
-test:
+test: test-rust test-py
+
+test-rust:
 	@echo "=> Running Rust tests..."
 	cargo test -p framelaw-core
+
+test-py:
 	@echo "=> Running Python tests..."
 	uv run --with-editable ./framelaw-py pytest framelaw-py/tests -q
 
 example:
 	@echo "=> Running basic example..."
 	uv run --with-editable ./framelaw-py python examples/basic_validation.py
+
+benchmark:
+	@echo "=> Running benchmark (numbers only meaningful on build-release)..."
+	uv run --with-editable ./framelaw-py python examples/benchmark.py
 
 examples:
 	@echo "=> Running all examples..."

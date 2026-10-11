@@ -25,8 +25,8 @@ jobs:
         run: cargo test -p framelaw-core
       - name: Ruff lint and format check
         run: |
-          uvx ruff check .
-          uvx ruff format --check .
+          uvx ruff check framelaw-py examples
+          uvx ruff format --check framelaw-py examples
       - name: Type check
         run: uv run --with ty ty check framelaw-py/python examples
       - name: Docstring coverage
