@@ -26,7 +26,10 @@ jobs:
           uvx ruff check framelaw-py examples
           uvx ruff format --check framelaw-py examples
       - name: Type check
-        run: uv run --with ty ty check framelaw-py/python examples
+        run: |
+          test -d .venv || uv venv
+          uv pip install -q ty polars pydantic
+          uv run ty check --extra-search-path framelaw-py/python framelaw-py/python examples
       - name: Docstring coverage
         run: uvx interrogate framelaw-py/python examples
 
@@ -44,11 +47,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Create venv
-        run: uv venv
-      - name: Build extension
-        run: make build
+      - name: Create venv and build extension
+        run: |
+          test -d .venv || uv venv
+          uv pip install -e ./framelaw-py
       - name: Rust tests
-        run: make test-rust
+        run: cargo test -p framelaw-core
       - name: Examples smoke test
-        run: make examples
+        run: |
+          for example in examples/*.py; do
+            uv run --with-editable ./framelaw-py python "$example"
+          done

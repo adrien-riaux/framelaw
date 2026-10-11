@@ -28,7 +28,10 @@ jobs:
           uvx ruff check framelaw-py examples
           uvx ruff format --check framelaw-py examples
       - name: Type check
-        run: uv run --with ty ty check framelaw-py/python examples
+        run: |
+          uv venv
+          uv pip install -q ty polars pydantic
+          uv run ty check --extra-search-path framelaw-py/python framelaw-py/python examples
       - name: Docstring coverage
         run: uvx interrogate framelaw-py/python examples
 
