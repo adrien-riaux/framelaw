@@ -51,7 +51,7 @@ test:
 	@echo "=> Running Rust tests..."
 	cargo test -p framelaw-core
 	@echo "=> Running Python tests..."
-	uv run --with-editable ./framelaw-py pytest framelaw-py/tests -q
+	uv run --with pytest --with-editable ./framelaw-py pytest framelaw-py/tests -q
 
 examples:
 	@echo "=> Running all examples..."
