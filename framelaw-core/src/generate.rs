@@ -4,6 +4,7 @@ use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use regex::Regex;
 
 use crate::checks::{is_supported_numeric_dtype, CheckSpec};
 use crate::column::ColumnSpec;
@@ -89,30 +90,44 @@ fn sample_f64_in(
     bounds: &NumericBounds,
     fallback_lo: f64,
     fallback_hi: f64,
+    min_width: f64,
 ) -> PolarsResult<f64> {
     if bounds.is_empty() {
         return Err(PolarsError::ComputeError(
             "Unsatisfiable numeric bounds in schema".into(),
         ));
     }
-    let lo = if bounds.lo.is_finite() {
-        if bounds.lo_inclusive {
-            bounds.lo
-        } else {
-            bounds.lo.next_up()
-        }
-    } else {
-        fallback_lo
-    };
-    let hi = if bounds.hi.is_finite() {
+    // Unbounded sides inherit a window from the fallback range, widened to at
+    // least min_width (e.g. room for `n` distinct values under `unique()`).
+    // Deriving the window from the bounded side keeps one-sided constraints
+    // such as `gt(2000)` satisfiable.
+    let span = (fallback_hi - fallback_lo).max(min_width).max(1.0);
+    let mut hi = if bounds.hi.is_finite() {
         if bounds.hi_inclusive {
             bounds.hi
         } else {
             bounds.hi.next_down()
         }
     } else {
-        fallback_hi
+        f64::INFINITY
     };
+    let mut lo = if bounds.lo.is_finite() {
+        if bounds.lo_inclusive {
+            bounds.lo
+        } else {
+            bounds.lo.next_up()
+        }
+    } else {
+        f64::NEG_INFINITY
+    };
+    if !lo.is_finite() && hi.is_finite() {
+        lo = hi - span;
+    } else if lo.is_finite() && !hi.is_finite() {
+        hi = lo + span;
+    } else if !lo.is_finite() {
+        lo = fallback_lo;
+        hi = lo + span;
+    }
     if lo > hi {
         return Err(PolarsError::ComputeError(
             "Unsatisfiable numeric bounds in schema".into(),
@@ -195,7 +210,30 @@ fn gen_string_value(rng: &mut ChaCha8Rng, specs: &[CheckSpec], row: usize) -> Po
                 "Unsatisfiable one_of with no allowed values".into(),
             ));
         }
-        return Ok(allowed[rng.random_range(0..allowed.len())].clone());
+        let patterns = matches_patterns(specs);
+        if patterns.is_empty() {
+            return Ok(allowed[rng.random_range(0..allowed.len())].clone());
+        }
+        // Both membership and regex constraints apply: sample from their
+        // intersection so generated values satisfy the whole schema.
+        let regexes = patterns
+            .iter()
+            .map(|pattern| {
+                Regex::new(pattern).map_err(|_| {
+                    PolarsError::ComputeError(format!("Invalid regex: {pattern}").into())
+                })
+            })
+            .collect::<PolarsResult<Vec<_>>>()?;
+        let matching: Vec<&String> = allowed
+            .iter()
+            .filter(|value| regexes.iter().all(|regex| regex.is_match(value)))
+            .collect();
+        if matching.is_empty() {
+            return Err(PolarsError::ComputeError(
+                "Unsatisfiable one_of and matches constraints in schema".into(),
+            ));
+        }
+        return Ok(matching[rng.random_range(0..matching.len())].clone());
     }
     let patterns = matches_patterns(specs);
     for pattern in &patterns {
@@ -227,20 +265,196 @@ fn gen_int_series(
     specs: &[CheckSpec],
     n: usize,
 ) -> PolarsResult<Series> {
-    let bounds = numeric_bounds(specs);
-    let (fallback_lo, fallback_hi) = match dtype {
-        DataType::UInt8 => (0.0, 200.0),
-        DataType::UInt16 => (0.0, 1000.0),
-        DataType::UInt32 => (0.0, 100_000.0),
-        DataType::UInt64 | DataType::UInt128 => (0.0, 1_000_000.0),
-        DataType::Int8 => (-100.0, 100.0),
-        _ => (0.0, 1000.0),
+    // Sample in the integer domain so every value satisfies the bounds
+    // exactly; float sampling plus truncation can land outside them.
+    let min_width = int_min_width(specs, n);
+    if *dtype == DataType::UInt128 {
+        let fallback = (0u128, 1_000_000u128);
+        let (lo, hi) = int_range_u128(specs, fallback, min_width)?;
+        let values: Vec<u128> = (0..n).map(|_| rng.random_range(lo..=hi)).collect();
+        return cast_to_dtype(Series::new(name.clone(), values), dtype);
+    }
+    let (dmin, dmax, fallback) = match dtype {
+        DataType::Int8 => (
+            i128::from(i8::MIN),
+            i128::from(i8::MAX),
+            (-100i128, 100i128),
+        ),
+        DataType::UInt8 => (0, i128::from(u8::MAX), (0, 200)),
+        DataType::UInt16 => (0, i128::from(u16::MAX), (0, 1000)),
+        DataType::UInt32 => (0, i128::from(u32::MAX), (0, 100_000)),
+        DataType::UInt64 => (0, i128::from(u64::MAX), (0, 1_000_000)),
+        DataType::Int128 => (i128::MIN, i128::MAX, (0, 1000)),
+        _ => (i128::from(i64::MIN), i128::from(i64::MAX), (0, 1000)),
     };
-    let values: Vec<f64> = (0..n)
-        .map(|_| sample_f64_in(rng, &bounds, fallback_lo, fallback_hi))
-        .collect::<PolarsResult<_>>()?;
-    let float_series = Series::new(name.clone(), values);
-    cast_to_dtype(float_series, dtype)
+    let (lo, hi) = int_range_i128(specs, dmin, dmax, fallback, min_width)?;
+    let values: Vec<i128> = (0..n).map(|_| rng.random_range(lo..=hi)).collect();
+    cast_to_dtype(Series::new(name.clone(), values), dtype)
+}
+
+/// Inclusive integer sampling range from check bounds.
+/// Errors when no representable integer satisfies the bounds.
+///
+/// Windows already compatible with the old float-fallback behavior are kept
+/// as-is; only a fallback side that contradicts a real bound is re-derived
+/// from the bounded side (e.g. `gt(2000)` with a `0..1000` fallback).
+fn int_range_i128(
+    specs: &[CheckSpec],
+    dmin: i128,
+    dmax: i128,
+    fallback: (i128, i128),
+    min_unique: u128,
+) -> PolarsResult<(i128, i128)> {
+    let bounds = numeric_bounds(specs);
+    if bounds.lo == f64::INFINITY || bounds.hi == f64::NEG_INFINITY {
+        return Err(unsatisfiable_bounds());
+    }
+    // Smallest/largest integers satisfying each side (`as` casts saturate,
+    // so out-of-range thresholds stay sound and never panic). Unbounded
+    // sides start from the fallback window, preserving established
+    // sampling distributions.
+    let raw_lo: i128 = if bounds.lo.is_finite() {
+        if bounds.lo_inclusive {
+            bounds.lo.ceil() as i128
+        } else {
+            (bounds.lo.floor() as i128).saturating_add(1)
+        }
+    } else {
+        fallback.0
+    };
+    let raw_hi: i128 = if bounds.hi.is_finite() {
+        if bounds.hi_inclusive {
+            bounds.hi.floor() as i128
+        } else {
+            (bounds.hi.ceil() as i128).saturating_sub(1)
+        }
+    } else {
+        fallback.1
+    };
+    if raw_lo > dmax || raw_hi < dmin {
+        return Err(unsatisfiable_bounds());
+    }
+    let mut lo = raw_lo.clamp(dmin, dmax);
+    let mut hi = raw_hi.clamp(dmin, dmax);
+    if lo <= hi {
+        // Widen for unique() only on unbounded sides; a bounded window that
+        // is too small is genuinely unsatisfiable for sampling.
+        if min_unique > 0 && ((hi - lo) as u128) < min_unique {
+            if !bounds.lo.is_finite() {
+                let room = ((hi - dmin).max(0)) as u128;
+                lo = hi.saturating_sub(min_unique.min(room) as i128).max(dmin);
+            } else if !bounds.hi.is_finite() {
+                let room = ((dmax - lo).max(0)) as u128;
+                hi = lo.saturating_add(min_unique.min(room) as i128).min(dmax);
+            } else {
+                return Err(unsatisfiable_bounds());
+            }
+            if ((hi - lo).max(0) as u128) < min_unique {
+                return Err(unsatisfiable_bounds());
+            }
+        }
+        return Ok((lo, hi));
+    }
+    // Contradiction between a real bound and a fallback default: re-derive
+    // the fallback side from the bounded side.
+    let span = (fallback.1 - fallback.0).max(0) as u128;
+    let span = span.max(min_unique).max(1);
+    if bounds.lo.is_finite() && !bounds.hi.is_finite() {
+        lo = raw_lo.clamp(dmin, dmax);
+        hi = lo
+            .saturating_add(span.min((dmax - lo).max(0) as u128) as i128)
+            .min(dmax);
+    } else if !bounds.lo.is_finite() && bounds.hi.is_finite() {
+        hi = raw_hi.clamp(dmin, dmax);
+        lo = hi
+            .saturating_sub(span.min((hi - dmin).max(0) as u128) as i128)
+            .max(dmin);
+    } else {
+        return Err(unsatisfiable_bounds());
+    }
+    if lo > hi {
+        return Err(unsatisfiable_bounds());
+    }
+    Ok((lo, hi))
+}
+
+/// Inclusive `u128` sampling range; mirrors `int_range_i128`.
+fn int_range_u128(
+    specs: &[CheckSpec],
+    fallback: (u128, u128),
+    min_unique: u128,
+) -> PolarsResult<(u128, u128)> {
+    let bounds = numeric_bounds(specs);
+    if bounds.lo == f64::INFINITY || bounds.hi == f64::NEG_INFINITY {
+        return Err(unsatisfiable_bounds());
+    }
+    let raw_lo: u128 = if bounds.lo.is_finite() {
+        if bounds.lo_inclusive {
+            bounds.lo.ceil().max(0.0) as u128
+        } else {
+            (bounds.lo.floor().max(0.0) as u128).saturating_add(1)
+        }
+    } else {
+        fallback.0
+    };
+    let raw_hi: u128 = if bounds.hi.is_finite() {
+        if bounds.hi_inclusive {
+            bounds.hi.floor().min(u128::MAX as f64) as u128
+        } else {
+            (bounds.hi.ceil().min(u128::MAX as f64) as u128).saturating_sub(1)
+        }
+    } else {
+        fallback.1
+    };
+    if raw_lo > raw_hi {
+        // Contradiction between a real bound and a fallback default:
+        // re-derive the fallback side from the bounded side.
+        let span = (fallback.1 - fallback.0).max(min_unique).max(1);
+        if bounds.lo.is_finite() && !bounds.hi.is_finite() {
+            let hi = raw_lo.saturating_add(span.min(u128::MAX - raw_lo));
+            return if raw_lo <= hi {
+                Ok((raw_lo, hi))
+            } else {
+                Err(unsatisfiable_bounds())
+            };
+        } else if !bounds.lo.is_finite() && bounds.hi.is_finite() {
+            let lo = raw_hi.saturating_sub(span.min(raw_hi));
+            return if lo <= raw_hi {
+                Ok((lo, raw_hi))
+            } else {
+                Err(unsatisfiable_bounds())
+            };
+        }
+        return Err(unsatisfiable_bounds());
+    }
+    let (mut lo, mut hi) = (raw_lo, raw_hi);
+    if min_unique > 0 && (hi - lo) < min_unique {
+        if !bounds.lo.is_finite() {
+            lo = hi.saturating_sub(min_unique.min(hi));
+        } else if !bounds.hi.is_finite() {
+            hi = lo.saturating_add(min_unique.min(u128::MAX - lo));
+        } else {
+            return Err(unsatisfiable_bounds());
+        }
+        if (hi - lo) < min_unique {
+            return Err(unsatisfiable_bounds());
+        }
+    }
+    Ok((lo, hi))
+}
+
+fn unsatisfiable_bounds() -> PolarsError {
+    PolarsError::ComputeError("Unsatisfiable numeric bounds in schema".into())
+}
+
+/// Distinct values required beyond the first, so `unique()` columns can find
+/// room for `n` distinct values (`0` when uniqueness is not needed).
+fn int_min_width(specs: &[CheckSpec], n: usize) -> u128 {
+    if has_unique(specs) {
+        n.saturating_sub(1) as u128
+    } else {
+        0
+    }
 }
 
 fn gen_float_series(
@@ -251,8 +465,9 @@ fn gen_float_series(
     n: usize,
 ) -> PolarsResult<Series> {
     let bounds = numeric_bounds(specs);
+    let min_width = if has_unique(specs) { n as f64 } else { 0.0 };
     let values: Vec<f64> = (0..n)
-        .map(|_| sample_f64_in(rng, &bounds, 0.0, 1.0))
+        .map(|_| sample_f64_in(rng, &bounds, 0.0, 1.0, min_width))
         .collect::<PolarsResult<_>>()?;
     let float_series = Series::new(name.clone(), values);
     cast_to_dtype(float_series, dtype)
@@ -265,10 +480,14 @@ fn gen_temporal_series(
     specs: &[CheckSpec],
     n: usize,
 ) -> PolarsResult<Series> {
-    let bounds = numeric_bounds(specs);
-    let values: Vec<i64> = (0..n)
-        .map(|_| sample_f64_in(rng, &bounds, 1.0, 10_000.0).map(|v| v.round() as i64))
-        .collect::<PolarsResult<_>>()?;
+    let (lo, hi) = int_range_i128(
+        specs,
+        i128::from(i64::MIN),
+        i128::from(i64::MAX),
+        (1, 10_000),
+        int_min_width(specs, n),
+    )?;
+    let values: Vec<i64> = (0..n).map(|_| rng.random_range(lo..=hi) as i64).collect();
     let int_series = Series::new(name.clone(), values);
     cast_to_dtype(int_series, dtype)
 }
@@ -470,17 +689,102 @@ fn specs_of(spec: &ColumnSpec) -> Vec<CheckSpec> {
     spec.checks.iter().map(|check| check.spec()).collect()
 }
 
-fn comparison_holds(op: CompareOp, left: &str, right: &str, numeric: bool) -> bool {
-    if numeric {
-        let (Ok(left), Ok(right)) = (left.parse::<f64>(), right.parse::<f64>()) else {
-            return false;
-        };
-        return compare_values(op, left, right);
-    }
-    compare_values(op, left, right)
+fn missing_sample_column(name: &str) -> PolarsError {
+    PolarsError::ColumnNotFound(format!("Table check references missing column '{name}'").into())
 }
 
-fn compare_values<T: PartialEq + PartialOrd>(op: CompareOp, left: T, right: T) -> bool {
+/// One extracted cell value for cross-column comparison. Numeric values keep
+/// their native precision (no `f64` rounding, no string formatting), so
+/// temporal and wide-integer comparisons behave like validation.
+#[derive(Clone)]
+enum Cell {
+    Int(Option<i128>),
+    UInt(Option<u128>),
+    Float(Option<f64>),
+    Text(Option<String>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CellKind {
+    Int,
+    UInt,
+    Float,
+    Text,
+}
+
+fn cell_kind(dtype: &DataType) -> Option<CellKind> {
+    match dtype {
+        DataType::String => Some(CellKind::Text),
+        DataType::Float16 | DataType::Float32 | DataType::Float64 => Some(CellKind::Float),
+        DataType::UInt128 => Some(CellKind::UInt),
+        dtype if is_supported_numeric_dtype(dtype) => Some(CellKind::Int),
+        _ => None,
+    }
+}
+
+fn unsupported_comparison_column(name: &str, dtype: &DataType) -> PolarsError {
+    PolarsError::ComputeError(format!("Cannot compare column '{name}' with dtype {dtype}").into())
+}
+
+fn extract_cells(series: &Series, kind: CellKind) -> PolarsResult<Vec<Cell>> {
+    match kind {
+        CellKind::Int => {
+            let base = match series.dtype() {
+                DataType::Date
+                | DataType::Datetime(_, _)
+                | DataType::Duration(_)
+                | DataType::Time => series.cast(&DataType::Int64)?,
+                _ => series.clone(),
+            };
+            let wide = base.cast(&DataType::Int128)?;
+            let values = wide.i128()?;
+            Ok(values.iter().map(Cell::Int).collect())
+        }
+        CellKind::UInt => {
+            let wide = series.cast(&DataType::UInt128)?;
+            let values = wide.u128()?;
+            Ok(values.iter().map(Cell::UInt).collect())
+        }
+        CellKind::Float => {
+            let wide = series.cast(&DataType::Float64)?;
+            let values = wide.f64()?;
+            Ok(values.iter().map(Cell::Float).collect())
+        }
+        CellKind::Text => {
+            let string = series.str().map_err(|_| {
+                PolarsError::ComputeError("Cannot compare non-string column".into())
+            })?;
+            Ok(string
+                .iter()
+                .map(|value| Cell::Text(value.map(str::to_string)))
+                .collect())
+        }
+    }
+}
+
+fn cells_hold(op: CompareOp, left: &Cell, right: &Cell) -> bool {
+    match (left, right) {
+        (Cell::Int(a), Cell::Int(b)) => opts_hold(op, a, b),
+        (Cell::UInt(a), Cell::UInt(b)) => opts_hold(op, a, b),
+        (Cell::Float(a), Cell::Float(b)) => opts_hold(op, a, b),
+        (Cell::Text(a), Cell::Text(b)) => opts_hold(op, a, b),
+        _ => false,
+    }
+}
+
+/// Nulls skip the comparison, mirroring validation semantics.
+fn opts_hold<T: PartialEq + PartialOrd>(
+    op: CompareOp,
+    left: &Option<T>,
+    right: &Option<T>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => compare_values(op, left, right),
+        _ => true,
+    }
+}
+
+fn compare_values<T: PartialEq + PartialOrd>(op: CompareOp, left: &T, right: &T) -> bool {
     match op {
         CompareOp::Lt => left < right,
         CompareOp::Le => left <= right,
@@ -491,6 +795,34 @@ fn compare_values<T: PartialEq + PartialOrd>(op: CompareOp, left: T, right: T) -
     }
 }
 
+/// Replaces one row of a frame column with a single-row candidate series.
+fn replace_row(
+    frame: &mut HashMap<String, Series>,
+    lookup: &HashMap<&str, &ColumnSpec>,
+    name: &str,
+    row: usize,
+    candidate: &Series,
+) -> PolarsResult<()> {
+    let current = frame.get(name).ok_or_else(|| missing_sample_column(name))?;
+    let n = current.len();
+    let values: Vec<AnyValue> = (0..n)
+        .map(|index| {
+            if index == row {
+                candidate.get(0).unwrap()
+            } else {
+                current.get(index).unwrap()
+            }
+        })
+        .collect();
+    let rebuilt = Series::from_any_values(PlSmallStr::from(name), &values, false)?;
+    let spec = lookup
+        .get(name)
+        .copied()
+        .ok_or_else(|| missing_sample_column(name))?;
+    frame.insert(name.to_string(), cast_to_dtype(rebuilt, &spec.dtype)?);
+    Ok(())
+}
+
 fn enforce_comparison(
     frame: &mut HashMap<String, Series>,
     lookup: &HashMap<&str, &ColumnSpec>,
@@ -499,35 +831,48 @@ fn enforce_comparison(
     op: CompareOp,
     right: &str,
 ) -> PolarsResult<()> {
+    let left_spec = lookup
+        .get(left)
+        .copied()
+        .ok_or_else(|| missing_sample_column(left))?;
+    let right_spec = lookup
+        .get(right)
+        .copied()
+        .ok_or_else(|| missing_sample_column(right))?;
+    let left_kind = cell_kind(&left_spec.dtype)
+        .ok_or_else(|| unsupported_comparison_column(left, &left_spec.dtype))?;
+    let right_kind = cell_kind(&right_spec.dtype)
+        .ok_or_else(|| unsupported_comparison_column(right, &right_spec.dtype))?;
+    // Mixed int/float pairs compare as floats, exactly like validation.
+    let kind = match (left_kind, right_kind) {
+        (CellKind::Text, CellKind::Text) => CellKind::Text,
+        (CellKind::UInt, CellKind::UInt) => CellKind::UInt,
+        (CellKind::Float, _) | (_, CellKind::Float) => CellKind::Float,
+        (CellKind::Int, CellKind::Int) => CellKind::Int,
+        _ => {
+            return Err(PolarsError::ComputeError(
+                format!("Cannot satisfy comparison '{left} {op:?} {right}': mismatched kinds")
+                    .into(),
+            ));
+        }
+    };
+
     let n = frame
         .get(left)
-        .map(|series| series.len())
-        .unwrap_or_else(|| frame.get(right).map(|series| series.len()).unwrap_or(0));
-    let left_is_numeric = lookup
-        .get(left)
-        .map(|spec| is_supported_numeric_dtype(&spec.dtype))
-        .unwrap_or(false);
-    let right_is_numeric = lookup
-        .get(right)
-        .map(|spec| is_supported_numeric_dtype(&spec.dtype))
-        .unwrap_or(false);
-    if left_is_numeric != right_is_numeric {
-        return Err(PolarsError::ComputeError(
-            format!("Cannot satisfy comparison '{left} {op:?} {right}': mismatched kinds").into(),
-        ));
-    }
-    let numeric = left_is_numeric;
-
+        .ok_or_else(|| missing_sample_column(left))?
+        .len();
+    let mut left_cells = extract_cells(
+        frame.get(left).ok_or_else(|| missing_sample_column(left))?,
+        kind,
+    )?;
+    let mut right_cells = extract_cells(
+        frame
+            .get(right)
+            .ok_or_else(|| missing_sample_column(right))?,
+        kind,
+    )?;
     for row in 0..n {
-        let left_value = frame[left]
-            .get(row)
-            .map(|v| v.to_string())
-            .unwrap_or_default();
-        let right_value = frame[right]
-            .get(row)
-            .map(|v| v.to_string())
-            .unwrap_or_default();
-        if comparison_holds(op, &left_value, &right_value, numeric) {
+        if cells_hold(op, &left_cells[row], &right_cells[row]) {
             continue;
         }
         let mut satisfied = false;
@@ -537,29 +882,19 @@ fn enforce_comparison(
         for _ in 0..200 {
             let left_candidate = resample_one(rng, lookup, left)?;
             let right_candidate = resample_one(rng, lookup, right)?;
-            let left_string = left_candidate
-                .get(0)
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            let right_string = right_candidate
-                .get(0)
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            if comparison_holds(op, &left_string, &right_string, numeric) {
-                for (name, candidate) in [(left, left_candidate), (right, right_candidate)] {
-                    let values: Vec<AnyValue> = (0..n)
-                        .map(|index| {
-                            if index == row {
-                                candidate.get(0).unwrap()
-                            } else {
-                                frame[name].get(index).unwrap()
-                            }
-                        })
-                        .collect();
-                    let rebuilt = Series::from_any_values(PlSmallStr::from(name), &values, false)?;
-                    let cast = cast_to_dtype(rebuilt, &lookup[name].dtype)?;
-                    frame.insert(name.to_string(), cast);
-                }
+            let left_cell = extract_cells(&left_candidate, kind)?
+                .into_iter()
+                .next()
+                .unwrap();
+            let right_cell = extract_cells(&right_candidate, kind)?
+                .into_iter()
+                .next()
+                .unwrap();
+            if cells_hold(op, &left_cell, &right_cell) {
+                replace_row(frame, lookup, left, row, &left_candidate)?;
+                replace_row(frame, lookup, right, row, &right_candidate)?;
+                left_cells[row] = left_cell;
+                right_cells[row] = right_cell;
                 satisfied = true;
                 break;
             }
@@ -579,13 +914,29 @@ fn enforce_unique_together(
     rng: &mut ChaCha8Rng,
     columns: &[String],
 ) -> PolarsResult<()> {
+    let first = columns.first().ok_or_else(|| {
+        PolarsError::ComputeError("UniqueTogether needs at least one column".into())
+    })?;
+    for name in columns {
+        if !lookup.contains_key(name.as_str()) {
+            return Err(missing_sample_column(name));
+        }
+    }
     let n = frame
-        .get(&columns[0])
-        .map(|series| series.len())
-        .unwrap_or(0);
+        .get(first)
+        .ok_or_else(|| missing_sample_column(first))?
+        .len();
     let last = columns.last().unwrap().clone();
     for _ in 0..(n * 10 + 10) {
-        let selected: Vec<Series> = columns.iter().map(|name| frame[name].clone()).collect();
+        let selected: Vec<Series> = columns
+            .iter()
+            .map(|name| {
+                frame
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| missing_sample_column(name))
+            })
+            .collect::<PolarsResult<_>>()?;
         let check_frame = DataFrame::new(n, selected.into_iter().map(Column::from).collect())?;
         let duplicated = check_frame.is_duplicated()?;
         if !duplicated.any() {
@@ -604,19 +955,7 @@ fn enforce_unique_together(
             .collect();
         for row in rows {
             let candidate = resample_one(rng, lookup, &last)?;
-            let candidate_value = candidate.get(0).unwrap();
-            let values: Vec<AnyValue> = (0..n)
-                .map(|index| {
-                    if index == row {
-                        candidate_value.clone()
-                    } else {
-                        frame[&last].get(index).unwrap()
-                    }
-                })
-                .collect();
-            let rebuilt = Series::from_any_values(PlSmallStr::from(last.as_str()), &values, false)?;
-            let cast = cast_to_dtype(rebuilt, &lookup[last.as_str()].dtype)?;
-            frame.insert(last.clone(), cast);
+            replace_row(frame, lookup, &last, row, &candidate)?;
         }
     }
     Err(PolarsError::ComputeError(
@@ -627,9 +966,14 @@ fn enforce_unique_together(
 /// Generate a valid `DataFrame` satisfying the schema.
 ///
 /// Strategies are derived from each column's dtype and checks, then
-/// cross-column checks are enforced with rejection sampling. Failures
-/// (contradictory bounds, unsatisfiable uniqueness) return an error.
+/// cross-column checks are enforced with rejection sampling. Because later
+/// repairs (e.g. uniqueness) can disturb earlier ones (e.g. comparisons),
+/// enforcement runs to a fixed point: each pass re-applies table checks,
+/// repairs single-column uniqueness, and validates the whole frame.
+/// Failures (contradictory bounds, unsatisfiable uniqueness) return an error.
 pub fn sample(schema: &Schema, n: usize, seed: u64) -> PolarsResult<DataFrame> {
+    const MAX_PASSES: usize = 10;
+
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let lookup = spec_lookup(schema);
     let mut frame: HashMap<String, Series> = HashMap::with_capacity(schema.columns.len());
@@ -642,29 +986,65 @@ pub fn sample(schema: &Schema, n: usize, seed: u64) -> PolarsResult<DataFrame> {
         frame.insert(spec.name.clone(), series);
     }
 
-    for check in &schema.table_checks {
-        match check.spec() {
-            DataFrameCheckSpec::ColumnComparison { left, op, right } => {
-                enforce_comparison(&mut frame, &lookup, &mut rng, &left, op, &right)?;
+    for _ in 0..MAX_PASSES {
+        for check in &schema.table_checks {
+            match check.spec() {
+                DataFrameCheckSpec::ColumnComparison { left, op, right } => {
+                    enforce_comparison(&mut frame, &lookup, &mut rng, &left, op, &right)?;
+                }
+                DataFrameCheckSpec::UniqueTogether { columns } => {
+                    enforce_unique_together(&mut frame, &lookup, &mut rng, &columns)?;
+                }
             }
-            DataFrameCheckSpec::UniqueTogether { columns } => {
-                enforce_unique_together(&mut frame, &lookup, &mut rng, &columns)?;
-            }
+        }
+
+        repair_unique_columns(schema, &mut frame, &mut rng)?;
+
+        if schema
+            .validate(&frame_to_dataframe(schema, &frame, n)?)
+            .is_valid()
+        {
+            return frame_to_dataframe(schema, &frame, n);
         }
     }
 
-    // Re-validate uniqueness for single-column unique checks after table repair.
+    Err(PolarsError::ComputeError(
+        "Could not satisfy all schema constraints while sampling".into(),
+    ))
+}
+
+/// Re-applies single-column uniqueness after table-check repairs.
+fn repair_unique_columns(
+    schema: &Schema,
+    frame: &mut HashMap<String, Series>,
+    rng: &mut ChaCha8Rng,
+) -> PolarsResult<()> {
     for spec in &schema.columns {
-        let series = &frame[&spec.name];
+        let series = frame
+            .get(&spec.name)
+            .ok_or_else(|| missing_sample_column(&spec.name))?;
         if has_unique(&specs_of(spec)) && series.n_unique().unwrap_or(0) != series.len() {
-            let repaired = ensure_unique(series.clone(), &mut rng, &spec.dtype, &specs_of(spec))?;
+            let repaired = ensure_unique(series.clone(), rng, &spec.dtype, &specs_of(spec))?;
             frame.insert(spec.name.clone(), repaired);
         }
     }
+    Ok(())
+}
 
+/// Assembles the working map into a `DataFrame` in schema column order.
+fn frame_to_dataframe(
+    schema: &Schema,
+    frame: &HashMap<String, Series>,
+    n: usize,
+) -> PolarsResult<DataFrame> {
     let mut columns = Vec::with_capacity(frame.len());
     for spec in &schema.columns {
-        columns.push(Column::from(frame.remove(&spec.name).unwrap()));
+        columns.push(Column::from(
+            frame
+                .get(&spec.name)
+                .ok_or_else(|| missing_sample_column(&spec.name))?
+                .clone(),
+        ));
     }
     DataFrame::new(n, columns)
 }
@@ -751,6 +1131,162 @@ mod tests {
             })],
         }]);
         let frame = sample(&schema, 10, 3).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+    }
+
+    #[test]
+    fn string_intersection_of_one_of_and_matches() {
+        use crate::checks::MatchesRegex;
+        let schema = Schema::new(vec![ColumnSpec {
+            name: "code".to_string(),
+            dtype: DataType::String,
+            nullable: false,
+            checks: vec![
+                Box::new(OneOfString {
+                    allowed_values: ["FR".to_string(), "12".to_string()]
+                        .into_iter()
+                        .collect::<StdHashSet<_>>(),
+                }),
+                Box::new(MatchesRegex {
+                    pattern: regex::Regex::new(r"^[A-Z]{2}$").unwrap(),
+                }),
+            ],
+        }]);
+        let frame = sample(&schema, 10, 5).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+        assert!(frame
+            .column("code")
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .flatten()
+            .all(|value| value == "FR"));
+    }
+
+    #[test]
+    fn empty_string_intersection_returns_an_error() {
+        use crate::checks::MatchesRegex;
+        let schema = Schema::new(vec![ColumnSpec {
+            name: "code".to_string(),
+            dtype: DataType::String,
+            nullable: false,
+            checks: vec![
+                Box::new(OneOfString {
+                    allowed_values: ["xx".to_string()].into_iter().collect::<StdHashSet<_>>(),
+                }),
+                Box::new(MatchesRegex {
+                    pattern: regex::Regex::new(r"^\d+$").unwrap(),
+                }),
+            ],
+        }]);
+        assert!(sample(&schema, 5, 5).is_err());
+    }
+
+    #[test]
+    fn one_sided_bounds_beyond_the_fallback_stay_satisfiable() {
+        let schema = Schema::new(vec![int_spec(
+            "value",
+            vec![Box::new(GreaterThanF64 { min_value: 2000.0 })],
+        )]);
+        let frame = sample(&schema, 10, 9).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+    }
+
+    #[test]
+    fn strict_integer_bounds_are_respected() {
+        // gt(5) must never sample 5 itself.
+        let schema = Schema::new(vec![int_spec(
+            "value",
+            vec![Box::new(GreaterThanF64 { min_value: 5.0 })],
+        )]);
+        for seed in 0..10 {
+            let frame = sample(&schema, 50, seed).unwrap();
+            assert!(schema.validate(&frame).is_valid());
+            assert!(frame
+                .column("value")
+                .unwrap()
+                .i64()
+                .unwrap()
+                .iter()
+                .flatten()
+                .all(|value| value > 5));
+        }
+    }
+
+    #[test]
+    fn empty_integer_intersection_returns_an_error() {
+        // No integer lies strictly between 0.1 and 0.9.
+        let schema = Schema::new(vec![int_spec(
+            "value",
+            vec![
+                Box::new(GreaterThanF64 { min_value: 0.1 }),
+                Box::new(crate::checks::LessThanF64 { max_value: 0.9 }),
+            ],
+        )]);
+        assert!(sample(&schema, 5, 11).is_err());
+    }
+
+    #[test]
+    fn samples_temporal_comparisons() {
+        let schema = Schema::with_table_checks(
+            vec![
+                ColumnSpec {
+                    name: "start".to_string(),
+                    dtype: DataType::Date,
+                    nullable: false,
+                    checks: vec![],
+                },
+                ColumnSpec {
+                    name: "end".to_string(),
+                    dtype: DataType::Date,
+                    nullable: false,
+                    checks: vec![],
+                },
+            ],
+            vec![Box::new(ColumnComparison {
+                left: "start".to_string(),
+                op: CompareOp::Lt,
+                right: "end".to_string(),
+            })],
+        );
+        let frame = sample(&schema, 10, 13).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+    }
+
+    #[test]
+    fn missing_table_column_returns_an_error_instead_of_panicking() {
+        let schema = Schema::with_table_checks(
+            vec![int_spec("start", vec![])],
+            vec![Box::new(ColumnComparison {
+                left: "start".to_string(),
+                op: CompareOp::Lt,
+                right: "ghost".to_string(),
+            })],
+        );
+        assert!(sample(&schema, 5, 17).is_err());
+    }
+
+    #[test]
+    fn unique_and_comparison_converge_together() {
+        use crate::checks::UniqueValues;
+        let schema = Schema::with_table_checks(
+            vec![
+                ColumnSpec {
+                    name: "start".to_string(),
+                    dtype: DataType::Int64,
+                    nullable: false,
+                    checks: vec![Box::new(UniqueValues)],
+                },
+                int_spec("end", vec![]),
+            ],
+            vec![Box::new(ColumnComparison {
+                left: "start".to_string(),
+                op: CompareOp::Lt,
+                right: "end".to_string(),
+            })],
+        );
+        let frame = sample(&schema, 15, 19).unwrap();
         assert!(schema.validate(&frame).is_valid());
     }
 }

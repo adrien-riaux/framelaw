@@ -413,3 +413,58 @@ def test_sample_unsatisfiable_raises() -> None:
     )
     with pytest.raises(ValueError, match="[Uu]nsatisfiable"):
         schema.sample(5, seed=1)
+
+
+def test_wide_integers_compare_exactly() -> None:
+    """Values above 2**53 keep their distinctness in numeric checks."""
+    two_to_53 = 2**53
+    schema = fl.Schema({"value": fl.Column(pl.UInt64, checks=[fl.gt(float(two_to_53))])})
+    dataframe = pl.DataFrame({"value": [two_to_53, two_to_53 + 1]}, schema={"value": pl.UInt64})
+    report = schema.validate(dataframe, raise_on_error=False)
+    assert not report.is_valid()
+    assert report.errors[0].rows == [0]
+
+
+def test_explicit_not_null_fails_on_all_null_column() -> None:
+    """An explicit not_null() still fires on an all-null column."""
+    schema = fl.Schema({"value": fl.Column(pl.Null, checks=[fl.not_null()])})
+    dataframe = pl.DataFrame({"value": [None, None]}, schema={"value": pl.Null})
+    report = schema.validate(dataframe, raise_on_error=False)
+    assert not report.is_valid()
+    assert report.errors[0].check == "NotNull"
+    assert report.errors[0].rows == [0, 1]
+
+
+def test_pydantic_string_length_is_not_a_list_check() -> None:
+    """min_length on str fields must not produce ListLen checks."""
+
+    class Named(BaseModel):
+        name: str = Field(min_length=2)
+
+    schema = fl.Schema.from_pydantic(Named)
+    assert schema.validate(pl.DataFrame({"name": ["a", "ab"]})) is None
+
+
+def test_nested_dtype_json_round_trip() -> None:
+    """Lists of structs and struct fields survive JSON persistence."""
+    schema = fl.Schema(
+        {
+            "items": fl.Column(pl.List(pl.Struct({"n": pl.Int64}))),
+            "address": fl.Column(
+                pl.Struct({"zip": pl.String, "codes": pl.List(pl.Int64)}),
+                checks=[fl.struct_field("zip", [fl.matches(r"^\d{5}$")])],
+            ),
+        }
+    )
+    valid = pl.DataFrame(
+        {
+            "items": [[{"n": 1}], [{"n": 2}]],
+            "address": [
+                {"zip": "75001", "codes": [1]},
+                {"zip": "69001", "codes": [2, 3]},
+            ],
+        }
+    )
+    assert schema.validate(valid) is None
+    restored = fl.Schema.from_json(schema.to_json())
+    assert restored.validate(valid) is None

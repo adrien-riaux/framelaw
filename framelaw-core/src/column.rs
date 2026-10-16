@@ -64,6 +64,14 @@ impl ColumnSpec {
         }
 
         if null_column_is_compatible {
+            // An all-null column carries no values for ordinary checks, but
+            // an explicit NotNull check must still report every row instead
+            // of being silently skipped.
+            for check in &self.checks {
+                if check.name() == "NotNull" {
+                    errors.append(&mut check.validate(&self.name, series));
+                }
+            }
             return errors;
         }
 
@@ -146,6 +154,38 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].check, "NotNull");
         assert_eq!(errors[0].rows, vec![1]);
+    }
+
+    #[test]
+    fn explicit_not_null_fails_on_all_null_column() {
+        use polars::prelude::DataType;
+        let df = DataFrame::new(3, vec![Series::new_null("value".into(), 3).into()]).unwrap();
+        assert_eq!(*df.column("value").unwrap().dtype(), DataType::Null);
+        let column = ColumnSpec {
+            name: "value".to_string(),
+            dtype: DataType::Null,
+            nullable: true,
+            checks: vec![Box::new(NotNull)],
+        };
+
+        let errors = column.validate(&df);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].check, "NotNull");
+        assert_eq!(errors[0].rows, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn all_null_column_without_not_null_stays_valid() {
+        let df = DataFrame::new(2, vec![Series::new_null("value".into(), 2).into()]).unwrap();
+        let column = ColumnSpec {
+            name: "value".to_string(),
+            dtype: DataType::Null,
+            nullable: true,
+            checks: vec![],
+        };
+
+        assert!(column.validate(&df).is_empty());
     }
 
     #[test]

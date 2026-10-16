@@ -1,6 +1,6 @@
 use polars::prelude::*;
 
-use crate::checks::{get_true_indices, numeric_series};
+use crate::checks::{get_true_indices, int_domain, numeric_series, IntDomain};
 use crate::errors::ValidationError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +61,81 @@ pub struct ColumnComparison {
     pub right: String,
 }
 
+impl ColumnComparison {
+    /// Exact integer-pair comparison in the widened `i128`/`u128` domain.
+    /// Temporal columns convert through `Int64` first. Nulls propagate as
+    /// null and are skipped by the caller, mirroring the float path.
+    fn validate_int_pair(
+        &self,
+        left: &Series,
+        right: &Series,
+        unsigned: bool,
+    ) -> Vec<ValidationError> {
+        fn to_int128(series: &Series) -> PolarsResult<Int128Chunked> {
+            match series.dtype() {
+                DataType::Date
+                | DataType::Datetime(_, _)
+                | DataType::Duration(_)
+                | DataType::Time => Ok(series
+                    .cast(&DataType::Int64)?
+                    .cast(&DataType::Int128)?
+                    .i128()?
+                    .clone()),
+                _ => Ok(series.cast(&DataType::Int128)?.i128()?.clone()),
+            }
+        }
+        let mask: PolarsResult<BooleanChunked> = (|| {
+            if unsigned {
+                let l = left.cast(&DataType::UInt128)?.u128()?.clone();
+                let r = right.cast(&DataType::UInt128)?.u128()?.clone();
+                Ok(match self.op {
+                    CompareOp::Lt => l.lt(&r),
+                    CompareOp::Le => l.lt_eq(&r),
+                    CompareOp::Gt => l.gt(&r),
+                    CompareOp::Ge => l.gt_eq(&r),
+                    CompareOp::Eq => l.equal(&r),
+                    CompareOp::Ne => l.not_equal(&r),
+                })
+            } else {
+                let l = to_int128(left)?;
+                let r = to_int128(right)?;
+                Ok(match self.op {
+                    CompareOp::Lt => l.lt(&r),
+                    CompareOp::Le => l.lt_eq(&r),
+                    CompareOp::Gt => l.gt(&r),
+                    CompareOp::Ge => l.gt_eq(&r),
+                    CompareOp::Eq => l.equal(&r),
+                    CompareOp::Ne => l.not_equal(&r),
+                })
+            }
+        })();
+        match mask {
+            Ok(mask) => {
+                // Rows where the comparison does not hold fail; nulls stay
+                // unset and are skipped, mirroring the float path.
+                let failed: Vec<usize> = mask
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, value)| match value {
+                        Some(false) => Some(index),
+                        _ => None,
+                    })
+                    .collect();
+                comparison_result(self, failed)
+            }
+            Err(error) => vec![ValidationError::multi(
+                vec![self.left.clone(), self.right.clone()],
+                self.name(),
+                vec![],
+                format!(
+                    "Failed to compare '{}' and '{}': {error}",
+                    self.left, self.right
+                ),
+            )],
+        }
+    }
+}
+
 impl DataFrameCheck for ColumnComparison {
     fn name(&self) -> &str {
         "ColumnComparison"
@@ -103,6 +178,19 @@ impl DataFrameCheck for ColumnComparison {
         }
 
         // Numeric comparison path (ints, floats, dates, datetimes).
+        // Integer pairs compare exactly in the i128/u128 domain so wide
+        // values above 2^53 keep their distinctness; any pair involving a
+        // float keeps the historical f64 semantics.
+        if int_domain(left.dtype()) == Some(IntDomain::I128)
+            && int_domain(right.dtype()) == Some(IntDomain::I128)
+        {
+            return self.validate_int_pair(&left, &right, false);
+        }
+        if int_domain(left.dtype()) == Some(IntDomain::U128)
+            && int_domain(right.dtype()) == Some(IntDomain::U128)
+        {
+            return self.validate_int_pair(&left, &right, true);
+        }
         let (Ok(left_num), Ok(right_num)) = (numeric_series(&left), numeric_series(&right)) else {
             return vec![ValidationError::multi(
                 vec![self.left.clone(), self.right.clone()],

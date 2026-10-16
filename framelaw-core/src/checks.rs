@@ -102,27 +102,24 @@ impl Check for GreaterThanF64 {
         CheckSpec::GreaterThan(self.min_value)
     }
     fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
-        let mut errors = Vec::new();
-
-        if let Ok(mask) = numeric_series(series).map(|ca| ca.lt_eq(self.min_value)) {
-            if mask.any() {
-                let rows = get_true_indices(&mask);
-                errors.push(ValidationError::single(
-                    column_name,
-                    self.name(),
-                    rows,
-                    format!("Values in '{}' must be > {}", column_name, self.min_value),
-                ));
-            }
-        } else {
-            errors.push(type_mismatch_error(
+        let mask = match int_fail_mask(series, IntPredicate::LessOrEqualFloor(self.min_value)) {
+            Some(mask) => mask,
+            None => numeric_series(series).map(|ca| ca.lt_eq(self.min_value)),
+        };
+        match mask {
+            Ok(mask) if mask.any() => vec![ValidationError::single(
+                column_name,
+                self.name(),
+                get_true_indices(&mask),
+                format!("Values in '{}' must be > {}", column_name, self.min_value),
+            )],
+            Ok(_) => Vec::new(),
+            Err(_) => vec![type_mismatch_error(
                 column_name,
                 self.name(),
                 "a numeric type",
-            ));
+            )],
         }
-
-        errors
     }
 }
 
@@ -139,27 +136,24 @@ impl Check for LessThanF64 {
         CheckSpec::LessThan(self.max_value)
     }
     fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
-        let mut errors = Vec::new();
-
-        if let Ok(mask) = numeric_series(series).map(|ca| ca.gt_eq(self.max_value)) {
-            if mask.any() {
-                let rows = get_true_indices(&mask);
-                errors.push(ValidationError::single(
-                    column_name,
-                    self.name(),
-                    rows,
-                    format!("Values in '{}' must be < {}", column_name, self.max_value),
-                ));
-            }
-        } else {
-            errors.push(type_mismatch_error(
+        let mask = match int_fail_mask(series, IntPredicate::GreaterOrEqualCeil(self.max_value)) {
+            Some(mask) => mask,
+            None => numeric_series(series).map(|ca| ca.gt_eq(self.max_value)),
+        };
+        match mask {
+            Ok(mask) if mask.any() => vec![ValidationError::single(
+                column_name,
+                self.name(),
+                get_true_indices(&mask),
+                format!("Values in '{}' must be < {}", column_name, self.max_value),
+            )],
+            Ok(_) => Vec::new(),
+            Err(_) => vec![type_mismatch_error(
                 column_name,
                 self.name(),
                 "a numeric type",
-            ));
+            )],
         }
-
-        errors
     }
 }
 
@@ -177,20 +171,20 @@ impl Check for GreaterThanOrEqualF64 {
     }
 
     fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
-        match numeric_series(series) {
-            Ok(values) => {
-                let mask = values.lt(self.min_value);
-                if mask.any() {
-                    vec![ValidationError::single(
-                        column_name,
-                        self.name(),
-                        get_true_indices(&mask),
-                        format!("Values in '{}' must be >= {}", column_name, self.min_value),
-                    )]
-                } else {
-                    Vec::new()
-                }
+        let mask = match int_fail_mask(series, IntPredicate::LessThanCeil(self.min_value)) {
+            Some(mask) => mask,
+            None => numeric_series(series).map(|ca| ca.lt(self.min_value)),
+        };
+        match mask {
+            Ok(mask) if mask.any() => {
+                vec![ValidationError::single(
+                    column_name,
+                    self.name(),
+                    get_true_indices(&mask),
+                    format!("Values in '{}' must be >= {}", column_name, self.min_value),
+                )]
             }
+            Ok(_) => Vec::new(),
             Err(_) => vec![type_mismatch_error(
                 column_name,
                 self.name(),
@@ -214,20 +208,20 @@ impl Check for LessThanOrEqualF64 {
     }
 
     fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
-        match numeric_series(series) {
-            Ok(values) => {
-                let mask = values.gt(self.max_value);
-                if mask.any() {
-                    vec![ValidationError::single(
-                        column_name,
-                        self.name(),
-                        get_true_indices(&mask),
-                        format!("Values in '{}' must be <= {}", column_name, self.max_value),
-                    )]
-                } else {
-                    Vec::new()
-                }
+        let mask = match int_fail_mask(series, IntPredicate::GreaterThanFloor(self.max_value)) {
+            Some(mask) => mask,
+            None => numeric_series(series).map(|ca| ca.gt(self.max_value)),
+        };
+        match mask {
+            Ok(mask) if mask.any() => {
+                vec![ValidationError::single(
+                    column_name,
+                    self.name(),
+                    get_true_indices(&mask),
+                    format!("Values in '{}' must be <= {}", column_name, self.max_value),
+                )]
             }
+            Ok(_) => Vec::new(),
             Err(_) => vec![type_mismatch_error(
                 column_name,
                 self.name(),
@@ -251,16 +245,21 @@ impl Check for BetweenF64 {
         CheckSpec::Between(self.min_value, self.max_value)
     }
     fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
-        let mut errors = Vec::new();
-
-        if let Ok(ca) = numeric_series(series) {
-            let mask_lt = ca.lt(self.min_value);
-            let mask_gt = ca.gt(self.max_value);
-
-            let combined_mask = mask_lt | mask_gt;
-            if combined_mask.any() {
-                let rows = get_true_indices(&combined_mask);
-                errors.push(ValidationError::single(
+        let mask = match int_fail_mask(
+            series,
+            IntPredicate::OutsideCeilFloor(self.min_value, self.max_value),
+        ) {
+            Some(mask) => mask,
+            None => numeric_series(series).map(|ca| {
+                let mask_lt = ca.lt(self.min_value);
+                let mask_gt = ca.gt(self.max_value);
+                mask_lt | mask_gt
+            }),
+        };
+        match mask {
+            Ok(mask) if mask.any() => {
+                let rows = get_true_indices(&mask);
+                vec![ValidationError::single(
                     column_name,
                     self.name(),
                     rows,
@@ -268,17 +267,15 @@ impl Check for BetweenF64 {
                         "Values in '{}' must be between {} and {}",
                         column_name, self.min_value, self.max_value
                     ),
-                ));
+                )]
             }
-        } else {
-            errors.push(type_mismatch_error(
+            Ok(_) => Vec::new(),
+            Err(_) => vec![type_mismatch_error(
                 column_name,
                 self.name(),
                 "a numeric type",
-            ));
+            )],
         }
-
-        errors
     }
 }
 
@@ -399,6 +396,105 @@ pub(crate) fn is_supported_numeric_dtype(dtype: &DataType) -> bool {
             | DataType::Duration(_)
             | DataType::Time
     )
+}
+
+/// Failure predicate for a numeric check, expressed so it can be evaluated
+/// exactly on integer values without rounding through `f64`.
+enum IntPredicate {
+    /// Fail iff `x <= floor(v)` (strict greater-than check).
+    LessOrEqualFloor(f64),
+    /// Fail iff `x >= ceil(v)` (strict less-than check).
+    GreaterOrEqualCeil(f64),
+    /// Fail iff `x < ceil(v)` (greater-than-or-equal check).
+    LessThanCeil(f64),
+    /// Fail iff `x > floor(v)` (less-than-or-equal check).
+    GreaterThanFloor(f64),
+    /// Fail iff `x < ceil(lo)` or `x > floor(hi)` (between check).
+    OutsideCeilFloor(f64, f64),
+}
+
+impl IntPredicate {
+    fn thresholds_finite(&self) -> bool {
+        match *self {
+            IntPredicate::LessOrEqualFloor(v)
+            | IntPredicate::GreaterOrEqualCeil(v)
+            | IntPredicate::LessThanCeil(v)
+            | IntPredicate::GreaterThanFloor(v) => v.is_finite(),
+            IntPredicate::OutsideCeilFloor(lo, hi) => lo.is_finite() && hi.is_finite(),
+        }
+    }
+}
+
+/// Integer comparison domain. Every supported integer width (and temporal
+/// types via `Int64`) widens losslessly into one of these two.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntDomain {
+    I128,
+    U128,
+}
+
+pub(crate) fn int_domain(dtype: &DataType) -> Option<IntDomain> {
+    match dtype {
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::Int128
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::Date
+        | DataType::Datetime(_, _)
+        | DataType::Duration(_)
+        | DataType::Time => Some(IntDomain::I128),
+        DataType::UInt128 => Some(IntDomain::U128),
+        _ => None,
+    }
+}
+
+/// Evaluates a numeric failure predicate exactly for integer and temporal
+/// columns by widening to `i128`/`u128` and comparing against `floor`/`ceil`
+/// bounds (Rust `as` casts saturate, so out-of-range thresholds stay sound).
+/// Returns `None` for non-integer dtypes or non-finite thresholds, in which
+/// case callers fall back to the `f64` path.
+fn int_fail_mask(series: &Series, pred: IntPredicate) -> Option<PolarsResult<BooleanChunked>> {
+    if !pred.thresholds_finite() {
+        return None;
+    }
+    let domain = int_domain(series.dtype())?;
+    let base = match series.dtype() {
+        DataType::Date | DataType::Datetime(_, _) | DataType::Duration(_) | DataType::Time => {
+            series.cast(&DataType::Int64).ok()?
+        }
+        _ => series.clone(),
+    };
+    Some((|| match domain {
+        IntDomain::I128 => {
+            let values = base.cast(&DataType::Int128)?.i128()?.clone();
+            Ok(match pred {
+                IntPredicate::LessOrEqualFloor(v) => values.lt_eq(v.floor() as i128),
+                IntPredicate::GreaterOrEqualCeil(v) => values.gt_eq(v.ceil() as i128),
+                IntPredicate::LessThanCeil(v) => values.lt(v.ceil() as i128),
+                IntPredicate::GreaterThanFloor(v) => values.gt(v.floor() as i128),
+                IntPredicate::OutsideCeilFloor(lo, hi) => {
+                    values.lt(lo.ceil() as i128) | values.gt(hi.floor() as i128)
+                }
+            })
+        }
+        IntDomain::U128 => {
+            let values = base.cast(&DataType::UInt128)?.u128()?.clone();
+            Ok(match pred {
+                IntPredicate::LessOrEqualFloor(v) => values.lt_eq(v.floor() as u128),
+                IntPredicate::GreaterOrEqualCeil(v) => values.gt_eq(v.ceil() as u128),
+                IntPredicate::LessThanCeil(v) => values.lt(v.ceil() as u128),
+                IntPredicate::GreaterThanFloor(v) => values.gt(v.floor() as u128),
+                IntPredicate::OutsideCeilFloor(lo, hi) => {
+                    values.lt(lo.ceil() as u128) | values.gt(hi.floor() as u128)
+                }
+            })
+        }
+    })())
 }
 
 /// Casts supported scalar numeric columns once so checks can use Polars' native
@@ -672,6 +768,77 @@ mod tests {
 
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("numeric type"));
+    }
+
+    #[test]
+    fn wide_integers_compare_exactly_above_2_to_53() {
+        // 2^53 + 1 is not representable as f64; the old float path merged it
+        // with 2^53 and reported the wrong row.
+        let two_to_53: u64 = 1 << 53;
+        let series = Series::new("value".into(), [two_to_53, two_to_53 + 1]);
+        let check = GreaterThanF64 {
+            min_value: two_to_53 as f64,
+        };
+
+        let errors = check.validate("value", &series);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![0]);
+    }
+
+    #[test]
+    fn i128_extremes_compare_exactly() {
+        let series = Series::new("value".into(), [i128::MIN, 0, i128::MAX]);
+        let check = LessThanF64 { max_value: 0.0 };
+
+        let errors = check.validate("value", &series);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![1, 2]);
+    }
+
+    #[test]
+    fn u128_saturating_thresholds_do_not_panic() {
+        let series = Series::new("value".into(), [u128::MAX - 1, u128::MAX]);
+        // (u128::MAX - 1) as f64 rounds up to 2^128, which saturates back to
+        // u128::MAX, so every value fails the strict greater-than check.
+        let check = GreaterThanF64 {
+            min_value: (u128::MAX - 1) as f64,
+        };
+
+        let errors = check.validate("value", &series);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![0, 1]);
+    }
+
+    #[test]
+    fn non_finite_thresholds_keep_float_semantics() {
+        let series = Series::new("value".into(), [1i64, 2, 3]);
+        let gt_inf = GreaterThanF64 {
+            min_value: f64::INFINITY,
+        };
+        let gt_neg_inf = GreaterThanF64 {
+            min_value: f64::NEG_INFINITY,
+        };
+
+        assert_eq!(gt_inf.validate("value", &series)[0].rows, vec![0, 1, 2]);
+        assert!(gt_neg_inf.validate("value", &series).is_empty());
+    }
+
+    #[test]
+    fn between_with_empty_integer_intersection_fails_all_rows() {
+        // No integer lies in (0.1, 0.9): every value must fail.
+        let series = Series::new("value".into(), [0i64, 1]);
+        let check = BetweenF64 {
+            min_value: 0.1,
+            max_value: 0.9,
+        };
+
+        let errors = check.validate("value", &series);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![0, 1]);
     }
 
     #[test]

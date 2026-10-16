@@ -547,6 +547,7 @@ impl PySchema {
     fn check_from_core_schema(
         schema: &Bound<'_, PyDict>,
         checks: &mut Vec<PyCheck>,
+        is_list: bool,
     ) -> PyResult<()> {
         if let Some(value) = schema.get_item("gt")? {
             checks.push(gt(value.extract()?)?);
@@ -563,7 +564,11 @@ impl PySchema {
         if let Some(value) = schema.get_item("pattern")? {
             checks.push(matches_regex(value.extract()?)?);
         }
-        // Pydantic list length constraints become ListLen checks.
+        // Length constraints only exist on list schemas; string fields also
+        // carry min/max_length, which has no list-length meaning.
+        if !is_list {
+            return Ok(());
+        }
         let min_len: Option<usize> = schema
             .get_item("min_length")?
             .map(|v| v.extract())
@@ -662,7 +667,7 @@ impl PySchema {
                     )))
                 }
             };
-            Self::check_from_core_schema(field_schema, &mut checks)?;
+            Self::check_from_core_schema(field_schema, &mut checks, field_type.as_str() == "list")?;
             if !nullable && !matches!(field_type.as_str(), "nullable") {
                 checks.push(not_null()?);
             }
@@ -766,13 +771,20 @@ impl PySchema {
     }
 
     fn dtype_from_name(py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        let dtype = Self::parse_dtype_name(name)?;
+        Ok(PyDataType(dtype).into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// Parses a dtype tag produced by `dtype_name`, recursing through nested
+    /// `List`/`Array`/`Struct` tags to arbitrary depth.
+    fn parse_dtype_name(name: &str) -> PyResult<polars::prelude::DataType> {
         if let Some(dtype) = Self::scalar_dtype_from_name(name) {
-            return Ok(PyDataType(dtype).into_pyobject(py)?.into_any().unbind());
+            return Ok(dtype);
         }
         if let Some(inner) = name.strip_prefix("List:") {
-            let inner_dtype = Self::dtype_from_core_name(inner)?;
-            let dtype = polars::prelude::DataType::List(Box::new(inner_dtype));
-            return Ok(PyDataType(dtype).into_pyobject(py)?.into_any().unbind());
+            return Ok(polars::prelude::DataType::List(Box::new(
+                Self::parse_dtype_name(inner)?,
+            )));
         }
         if let Some(rest) = name.strip_prefix("Array:") {
             let (inner_name, width) = rest.rsplit_once(':').ok_or_else(|| {
@@ -785,9 +797,10 @@ impl PySchema {
                     "Unsupported JSON Polars dtype '{name}'"
                 ))
             })?;
-            let inner_dtype = Self::dtype_from_core_name(inner_name)?;
-            let dtype = polars::prelude::DataType::Array(Box::new(inner_dtype), width);
-            return Ok(PyDataType(dtype).into_pyobject(py)?.into_any().unbind());
+            return Ok(polars::prelude::DataType::Array(
+                Box::new(Self::parse_dtype_name(inner_name)?),
+                width,
+            ));
         }
         if let Some(rest) = name.strip_prefix("Struct:") {
             let mut fields = Vec::new();
@@ -800,41 +813,22 @@ impl PySchema {
                     })?;
                     fields.push(polars::prelude::Field::new(
                         field_name.into(),
-                        Self::dtype_from_core_name(field_dtype)?,
+                        Self::parse_dtype_name(field_dtype)?,
                     ));
                 }
             }
-            let dtype = polars::prelude::DataType::Struct(fields);
-            return Ok(PyDataType(dtype).into_pyobject(py)?.into_any().unbind());
+            return Ok(polars::prelude::DataType::Struct(fields));
         }
         if name.starts_with("Duration:") {
-            let dtype = polars::prelude::DataType::Duration(Self::parse_time_unit(name)?);
-            return Ok(PyDataType(dtype).into_pyobject(py)?.into_any().unbind());
+            return Ok(polars::prelude::DataType::Duration(Self::parse_time_unit(
+                name,
+            )?));
         }
         if name.starts_with("Datetime:") {
-            let dtype = polars::prelude::DataType::Datetime(Self::parse_time_unit(name)?, None);
-            return Ok(PyDataType(dtype).into_pyobject(py)?.into_any().unbind());
-        }
-        Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Unsupported JSON Polars dtype '{name}'"
-        )))
-    }
-
-    fn dtype_from_core_name(name: &str) -> PyResult<polars::prelude::DataType> {
-        if let Some(dtype) = Self::scalar_dtype_from_name(name) {
-            return Ok(dtype);
-        }
-        if let Some(inner) = name.strip_prefix("List:") {
-            return Ok(polars::prelude::DataType::List(Box::new(
-                Self::dtype_from_core_name(inner)?,
-            )));
-        }
-        if name.starts_with("Duration:") || name.starts_with("Datetime:") {
-            let unit = Self::parse_time_unit(name)?;
-            if name.starts_with("Duration:") {
-                return Ok(polars::prelude::DataType::Duration(unit));
-            }
-            return Ok(polars::prelude::DataType::Datetime(unit, None));
+            return Ok(polars::prelude::DataType::Datetime(
+                Self::parse_time_unit(name)?,
+                None,
+            ));
         }
         Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Unsupported JSON Polars dtype '{name}'"
