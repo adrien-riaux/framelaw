@@ -806,8 +806,8 @@ fn absorb_distinct(
     }
 }
 
-fn apply_nullable(series: Series, rng: &mut ChaCha8Rng, nullable: bool) -> PolarsResult<Series> {
-    if !nullable || series.is_empty() {
+fn apply_nullable(series: Series, rng: &mut ChaCha8Rng) -> PolarsResult<Series> {
+    if series.is_empty() {
         return Ok(series);
     }
     if series.n_unique().unwrap_or(1) == series.len() && series.len() > 1 {
@@ -1264,7 +1264,14 @@ pub fn sample(schema: &Schema, n: usize, seed: u64) -> PolarsResult<DataFrame> {
         let name = PlSmallStr::from(spec.name.as_str());
         let specs = specs_of(spec);
         let series = gen_base_series(&mut rng, &name, &spec.dtype, &specs, n)?;
-        let series = apply_nullable(series, &mut rng, spec.nullable)?;
+        // Explicit NotNull forbids nulls even when the column is nullable;
+        // sampling nulls anyway would fail the schema on some seeds.
+        let series =
+            if spec.nullable && !specs.iter().any(|spec| matches!(spec, CheckSpec::NotNull)) {
+                apply_nullable(series, &mut rng)?
+            } else {
+                series
+            };
         frame.insert(spec.name.clone(), series);
     }
 
@@ -1507,6 +1514,24 @@ mod tests {
             ],
         )]);
         assert!(sample(&schema, 5, 11).is_err());
+    }
+
+    #[test]
+    fn nullable_not_null_columns_sample_without_nulls() {
+        use crate::checks::NotNull;
+        // Nullable but explicitly NotNull: nulls would fail validation, so
+        // sampling must never inject them, on any seed.
+        let schema = Schema::new(vec![ColumnSpec {
+            name: "value".to_string(),
+            dtype: DataType::Int64,
+            nullable: true,
+            checks: vec![Box::new(NotNull)],
+        }]);
+        for seed in 0..20 {
+            let frame = sample(&schema, 30, seed).unwrap();
+            assert!(schema.validate(&frame).is_valid());
+            assert_eq!(frame.column("value").unwrap().null_count(), 0);
+        }
     }
 
     #[test]

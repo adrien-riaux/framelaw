@@ -486,3 +486,12 @@ def test_struct_names_with_separators_round_trip() -> None:
     assert schema.validate(valid) is None
     restored = fl.Schema.from_json(schema.to_json())
     assert restored.validate(valid) is None
+
+
+def test_result_classes_are_importable() -> None:
+    """ValidationError/Report are part of the top-level API."""
+    from framelaw import ValidationError, ValidationReport
+
+    assert "ValidationError" in fl.__all__
+    assert "ValidationReport" in fl.__all__
+    assert ValidationError is not None and ValidationReport is not None
