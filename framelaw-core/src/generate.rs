@@ -747,9 +747,16 @@ fn ensure_unique(
             let out = Series::new(name.clone(), pool);
             return cast_to_dtype(out, dtype);
         }
-        if !matches_patterns(specs).is_empty() && n > 1 {
-            // Pattern-locked strings render identically on every draw.
-            return Err(unique_impossible("pattern-locked strings cannot vary"));
+        if !matches_patterns(specs).is_empty() {
+            // Pattern-locked strings render identically on every plain draw,
+            // but most regexes admit many values: expand by mutation.
+            match distinct_pattern_strings(rng, specs, n)? {
+                Some(pool) => {
+                    let out = Series::new(name.clone(), pool);
+                    return cast_to_dtype(out, dtype);
+                }
+                None => return Err(unique_impossible("pattern-locked strings cannot vary")),
+            }
         }
     }
     // Harvest distinct values in batches; every batch respects the checks,
@@ -776,6 +783,81 @@ fn ensure_unique(
 
 fn is_unique(series: &Series) -> bool {
     series.n_unique().unwrap_or(0) == series.len()
+}
+
+/// Expands pattern-locked strings into `n` distinct values satisfying every
+/// regex, by mutating known-good canned seeds. Returns `None` only when no
+/// seed exists (generation itself would already have failed); errors when
+/// the patterns admit fewer than `n` distinct values.
+fn distinct_pattern_strings(
+    rng: &mut ChaCha8Rng,
+    specs: &[CheckSpec],
+    n: usize,
+) -> PolarsResult<Option<Vec<String>>> {
+    let patterns = matches_patterns(specs);
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let regexes = patterns
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern)
+                .map_err(|_| PolarsError::ComputeError(format!("Invalid regex: {pattern}").into()))
+        })
+        .collect::<PolarsResult<Vec<_>>>()?;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut pool: Vec<String> = Vec::new();
+    for pattern in &patterns {
+        if let Some(canned) = canned_match(pattern) {
+            if regexes.iter().all(|regex| regex.is_match(&canned)) && seen.insert(canned.clone()) {
+                pool.push(canned);
+            }
+        }
+    }
+    if pool.is_empty() {
+        return Err(PolarsError::ComputeError(
+            "Cannot synthesize a string satisfying every pattern in schema".into(),
+        ));
+    }
+    let mut attempts = 0usize;
+    while pool.len() < n && attempts < 20_000 {
+        attempts += 1;
+        let base = pool[rng.random_range(0..pool.len())].clone();
+        let mutated = mutate_ascii_alnum(rng, &base);
+        if mutated != base
+            && regexes.iter().all(|regex| regex.is_match(&mutated))
+            && seen.insert(mutated.clone())
+        {
+            pool.push(mutated);
+        }
+    }
+    if pool.len() < n {
+        return Err(unique_impossible("pattern admits too few distinct values"));
+    }
+    pool.shuffle(rng);
+    pool.truncate(n);
+    Ok(Some(pool))
+}
+
+/// Substitutes one or two ASCII-alphanumeric characters; anything else
+/// (including non-ASCII bytes) is left untouched so output stays valid UTF-8.
+fn mutate_ascii_alnum(rng: &mut ChaCha8Rng, base: &str) -> String {
+    const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bytes = base.as_bytes().to_vec();
+    let positions: Vec<usize> = bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| byte.is_ascii_alphanumeric())
+        .map(|(index, _)| index)
+        .collect();
+    if positions.is_empty() {
+        return base.to_string();
+    }
+    for _ in 0..=rng.random_range(0..positions.len().min(2)) {
+        let position = positions[rng.random_range(0..positions.len())];
+        bytes[position] = ALNUM[rng.random_range(0..ALNUM.len())];
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| base.to_string())
 }
 
 /// A float dtype is pinned when the bounds collapse to a single value.
@@ -1552,6 +1634,41 @@ mod tests {
         }]);
         let frame = sample(&schema, 10, 23).unwrap();
         assert!(schema.validate(&frame).is_valid());
+    }
+
+    #[test]
+    fn unique_pattern_strings_expand_by_mutation() {
+        use crate::checks::{MatchesRegex, UniqueValues};
+        let schema = Schema::new(vec![ColumnSpec {
+            name: "code".to_string(),
+            dtype: DataType::String,
+            nullable: false,
+            checks: vec![
+                Box::new(UniqueValues),
+                Box::new(MatchesRegex {
+                    pattern: regex::Regex::new(r"^[A-Z]{2}$").unwrap(),
+                }),
+            ],
+        }]);
+        let frame = sample(&schema, 10, 31).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+    }
+
+    #[test]
+    fn single_valued_pattern_unique_errors() {
+        use crate::checks::{MatchesRegex, UniqueValues};
+        let schema = Schema::new(vec![ColumnSpec {
+            name: "code".to_string(),
+            dtype: DataType::String,
+            nullable: false,
+            checks: vec![
+                Box::new(UniqueValues),
+                Box::new(MatchesRegex {
+                    pattern: regex::Regex::new(r"^ab$").unwrap(),
+                }),
+            ],
+        }]);
+        assert!(sample(&schema, 3, 37).is_err());
     }
 
     #[test]

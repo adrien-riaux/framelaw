@@ -11,7 +11,7 @@ uv pip install -e ./framelaw-py
 ```
 
 This builds the native extension and installs the `framelaw` package alongside
-its Python dependencies (`polars>=0.20`, `pydantic>=2`).
+its Python dependencies (`polars>=1.0`, `pydantic>=2`).
 
 Requires Python 3.10+.
 

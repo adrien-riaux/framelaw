@@ -32,8 +32,8 @@ lint:
 	uvx interrogate framelaw-py/python examples
 
 build:
-	@echo "=> Building Python extension (debug)..."
-	uv pip install -e ./framelaw-py
+	@echo "=> Building Python extension (debug, with dev extras)..."
+	uv pip install -e "./framelaw-py[dev]"
 
 build-release:
 	@echo "=> Building optimized release extension..."
