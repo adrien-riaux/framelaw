@@ -3,26 +3,6 @@
 All notable changes to framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
-
-### Fixed
-- Numeric checks (`gt`, `lt`, `gte`, `lte`, `between`) and cross-column
-  comparisons now compare integers exactly in the native `i128`/`u128`
-  domain instead of rounding through `f64`, so wide values above 2^53 keep
-  their distinctness.
-- Explicit `not_null()` checks now fire on all-null columns instead of
-  being silently skipped.
-- `Field(min_length=..., max_length=...)` on Pydantic `str` fields no longer
-  produces bogus `ListLen` checks; length constraints apply to `list`
-  fields only.
-- Schema JSON round-trips arbitrarily nested dtypes (`List` of `Struct`,
-  struct fields holding lists, arrays of nested types).
-- `schema.sample()` honors combined `one_of` + `matches` constraints,
-  samples integers in the integer domain (strict bounds and empty
-  intersections handled), compares temporal columns by epoch value,
-  reports missing table-check columns as errors instead of panicking, and
-  converges uniqueness repairs with table checks to a fixed point.
-
 ## [0.1.0] — First release
 
 Polars-native DataFrame validation in Rust, exposed to Python via PyO3.
