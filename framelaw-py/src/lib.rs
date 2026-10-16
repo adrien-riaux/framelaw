@@ -729,7 +729,7 @@ impl PySchema {
                     .map(|field| {
                         Ok(format!(
                             "{}={}",
-                            field.name,
+                            Self::escape_name(field.name.as_str()),
                             Self::dtype_name(&field.dtype)?
                         ))
                     })
@@ -805,15 +805,18 @@ impl PySchema {
         if let Some(rest) = name.strip_prefix("Struct:") {
             let mut fields = Vec::new();
             if !rest.is_empty() {
-                for part in rest.split(',') {
-                    let (field_name, field_dtype) = part.split_once('=').ok_or_else(|| {
-                        pyo3::exceptions::PyValueError::new_err(format!(
-                            "Unsupported JSON Polars dtype '{name}'"
-                        ))
-                    })?;
+                for part in Self::split_escaped(rest, ',') {
+                    let (field_name, field_dtype) = Self::split_first_unescaped(&part, '=')
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "Unsupported JSON Polars dtype '{name}'"
+                            ))
+                        })?;
                     fields.push(polars::prelude::Field::new(
-                        field_name.into(),
-                        Self::parse_dtype_name(field_dtype)?,
+                        Self::unescape(&field_name).into(),
+                        // Dtype tags keep their escapes: each recursion level
+                        // unescapes only its own field names.
+                        Self::parse_dtype_name(&field_dtype)?,
                     ));
                 }
             }
@@ -833,6 +836,73 @@ impl PySchema {
         Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Unsupported JSON Polars dtype '{name}'"
         )))
+    }
+
+    /// Escapes a struct field name for the `Struct:` tag encoding. Commas
+    /// and `=` would otherwise parse as structural separators; backslashes
+    /// are escaped first so unescaping is unambiguous.
+    fn escape_name(name: &str) -> String {
+        name.replace('\\', "\\\\")
+            .replace(',', "\\,")
+            .replace('=', "\\=")
+    }
+
+    /// Reverses `escape_name`: `\x` becomes `x` for any `x`.
+    fn unescape(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        let mut chars = value.chars();
+        while let Some(char) = chars.next() {
+            if char == '\\' {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            } else {
+                out.push(char);
+            }
+        }
+        out
+    }
+
+    /// Splits on unescaped delimiters, keeping escape sequences intact for
+    /// deeper recursion levels to interpret.
+    fn split_escaped(value: &str, delimiter: char) -> Vec<String> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        let mut chars = value.chars().peekable();
+        while let Some(char) = chars.next() {
+            if char == '\\' {
+                current.push(char);
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            } else if char == delimiter {
+                parts.push(std::mem::take(&mut current));
+            } else {
+                current.push(char);
+            }
+        }
+        parts.push(current);
+        parts
+    }
+
+    /// Splits on the first unescaped `=` into (name, rest).
+    fn split_first_unescaped(value: &str, delimiter: char) -> Option<(String, String)> {
+        let mut name = String::new();
+        let mut chars = value.chars().peekable();
+        while let Some(char) = chars.next() {
+            if char == '\\' {
+                name.push(char);
+                if let Some(next) = chars.next() {
+                    name.push(next);
+                }
+            } else if char == delimiter {
+                let rest: String = chars.collect();
+                return Some((name, rest));
+            } else {
+                name.push(char);
+            }
+        }
+        None
     }
 
     fn parse_time_unit(value: &str) -> PyResult<polars::prelude::TimeUnit> {

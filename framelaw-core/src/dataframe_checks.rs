@@ -53,6 +53,15 @@ fn missing_column_error(requested: &[String]) -> ValidationError {
     )
 }
 
+/// Whether a dtype stores temporal ticks (whose raw magnitude depends on the
+/// unit, so mixed temporal dtypes must never be compared directly).
+pub(crate) fn is_temporal_dtype(dtype: &DataType) -> bool {
+    matches!(
+        dtype,
+        DataType::Date | DataType::Datetime(_, _) | DataType::Duration(_) | DataType::Time
+    )
+}
+
 /// Declarative comparison between two columns, e.g. `start < end`.
 /// Nulls on either side skip the row; use nullable=false for strictness.
 pub struct ColumnComparison {
@@ -175,6 +184,27 @@ impl DataFrameCheck for ColumnComparison {
                 }
             }
             return comparison_result(self, failed);
+        }
+
+        // Temporal columns carry their unit in the raw ticks (days vs
+        // microseconds vs ...), so mixed temporal dtypes would compare
+        // unrelated magnitudes. Require identical temporal dtypes.
+        if is_temporal_dtype(left.dtype())
+            && is_temporal_dtype(right.dtype())
+            && left.dtype() != right.dtype()
+        {
+            return vec![ValidationError::multi(
+                vec![self.left.clone(), self.right.clone()],
+                self.name(),
+                vec![],
+                format!(
+                    "Cannot compare '{}' ({}) and '{}' ({}): temporal columns must share a dtype",
+                    self.left,
+                    left.dtype(),
+                    self.right,
+                    right.dtype(),
+                ),
+            )];
         }
 
         // Numeric comparison path (ints, floats, dates, datetimes).
@@ -382,5 +412,47 @@ mod tests {
         let errors = check.validate(&df);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].rows, vec![0, 1]);
+    }
+
+    #[test]
+    fn mixed_temporal_units_are_rejected() {
+        // 1970-01-03 as days (2) vs a microsecond timestamp: raw ticks are
+        // unrelated magnitudes, so the comparison must refuse, not guess.
+        let dates = Series::new("day".into(), [2i32])
+            .cast(&DataType::Date)
+            .unwrap();
+        let instants = Series::new("instant".into(), [2i64])
+            .cast(&DataType::Datetime(TimeUnit::Microseconds, None))
+            .unwrap();
+        let df = DataFrame::new(1, vec![dates.into(), instants.into()]).unwrap();
+        let check = ColumnComparison {
+            left: "day".to_string(),
+            op: CompareOp::Lt,
+            right: "instant".to_string(),
+        };
+        let errors = check.validate(&df);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("must share a dtype"));
+    }
+
+    #[test]
+    fn wide_integers_compare_exactly_across_columns() {
+        let two_to_53: u64 = 1 << 53;
+        let df = DataFrame::new(
+            2,
+            vec![
+                Series::new("a".into(), [two_to_53, two_to_53]).into(),
+                Series::new("b".into(), [two_to_53 + 1, two_to_53]).into(),
+            ],
+        )
+        .unwrap();
+        let check = ColumnComparison {
+            left: "a".to_string(),
+            op: CompareOp::Lt,
+            right: "b".to_string(),
+        };
+        let errors = check.validate(&df);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![1]);
     }
 }

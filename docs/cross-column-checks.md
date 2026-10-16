@@ -34,6 +34,9 @@ Semantics:
 
 - Both columns must be numeric (including temporal) or both strings;
   mixing kinds reports an error.
+- Temporal columns must share the exact same dtype: comparing `Date`
+  (day counts) against `Datetime` (microsecond ticks) would compare
+  unrelated magnitudes, so it reports an error instead of guessing.
 - Rows where either side is null are **skipped** — enforce presence with
   `nullable=False` on the columns if nulls must fail.
 - The two column names must differ; otherwise construction raises

@@ -75,10 +75,10 @@ reference, runnable examples, and architecture notes.
 ## Development
 
 ```bash
-make build   # editable debug install
-make test    # Rust + Python suites
-make lint    # clippy, ruff, ty, interrogate
-make test    # Rust + Python suites, then make examples
+make build     # editable debug install
+make test      # Rust + Python suites
+make lint      # clippy, ruff, ty, interrogate
+make examples  # smoke-test every example script
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full contributor workflow.

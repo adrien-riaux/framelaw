@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use polars::prelude::*;
+use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -8,7 +9,7 @@ use regex::Regex;
 
 use crate::checks::{is_supported_numeric_dtype, CheckSpec};
 use crate::column::ColumnSpec;
-use crate::dataframe_checks::{CompareOp, DataFrameCheckSpec};
+use crate::dataframe_checks::{is_temporal_dtype, CompareOp, DataFrameCheckSpec};
 use crate::schema::Schema;
 
 /// Known string patterns from inference: generate a canned valid value.
@@ -203,49 +204,69 @@ fn struct_field_specs(specs: &[CheckSpec], field: &str) -> Vec<CheckSpec> {
     out
 }
 
-fn gen_string_value(rng: &mut ChaCha8Rng, specs: &[CheckSpec], row: usize) -> PolarsResult<String> {
-    if let Some(allowed) = one_of_values(specs) {
-        if allowed.is_empty() {
-            return Err(PolarsError::ComputeError(
-                "Unsatisfiable one_of with no allowed values".into(),
-            ));
-        }
-        let patterns = matches_patterns(specs);
-        if patterns.is_empty() {
-            return Ok(allowed[rng.random_range(0..allowed.len())].clone());
-        }
-        // Both membership and regex constraints apply: sample from their
-        // intersection so generated values satisfy the whole schema.
-        let regexes = patterns
-            .iter()
-            .map(|pattern| {
-                Regex::new(pattern).map_err(|_| {
-                    PolarsError::ComputeError(format!("Invalid regex: {pattern}").into())
-                })
-            })
-            .collect::<PolarsResult<Vec<_>>>()?;
-        let matching: Vec<&String> = allowed
-            .iter()
-            .filter(|value| regexes.iter().all(|regex| regex.is_match(value)))
-            .collect();
-        if matching.is_empty() {
-            return Err(PolarsError::ComputeError(
-                "Unsatisfiable one_of and matches constraints in schema".into(),
-            ));
-        }
-        return Ok(matching[rng.random_range(0..matching.len())].clone());
+/// String values satisfying both membership and regex constraints, or `None`
+/// when no membership constraint exists. Errors on empty intersections so
+/// callers never sample values that fail their own schema.
+fn allowed_strings(specs: &[CheckSpec]) -> PolarsResult<Option<Vec<String>>> {
+    let Some(allowed) = one_of_values(specs) else {
+        return Ok(None);
+    };
+    if allowed.is_empty() {
+        return Err(PolarsError::ComputeError(
+            "Unsatisfiable one_of with no allowed values".into(),
+        ));
     }
     let patterns = matches_patterns(specs);
+    if patterns.is_empty() {
+        return Ok(Some(allowed));
+    }
+    let regexes = patterns
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern)
+                .map_err(|_| PolarsError::ComputeError(format!("Invalid regex: {pattern}").into()))
+        })
+        .collect::<PolarsResult<Vec<_>>>()?;
+    let matching: Vec<String> = allowed
+        .into_iter()
+        .filter(|value| regexes.iter().all(|regex| regex.is_match(value)))
+        .collect();
+    if matching.is_empty() {
+        return Err(PolarsError::ComputeError(
+            "Unsatisfiable one_of and matches constraints in schema".into(),
+        ));
+    }
+    Ok(Some(matching))
+}
+
+fn gen_string_value(rng: &mut ChaCha8Rng, specs: &[CheckSpec], row: usize) -> PolarsResult<String> {
+    if let Some(allowed) = allowed_strings(specs)? {
+        return Ok(allowed[rng.random_range(0..allowed.len())].clone());
+    }
+    let patterns = matches_patterns(specs);
+    if patterns.is_empty() {
+        return Ok(format!("value-{row}"));
+    }
+    let regexes = patterns
+        .iter()
+        .map(|pattern| {
+            Regex::new(pattern)
+                .map_err(|_| PolarsError::ComputeError(format!("Invalid regex: {pattern}").into()))
+        })
+        .collect::<PolarsResult<Vec<_>>>()?;
+    // Try each known canned value against every pattern; synthesizing
+    // arbitrary intersections is out of scope, so report honestly when no
+    // candidate satisfies the whole set.
     for pattern in &patterns {
         if let Some(canned) = canned_match(pattern) {
-            return Ok(canned);
+            if regexes.iter().all(|regex| regex.is_match(&canned)) {
+                return Ok(canned);
+            }
         }
     }
-    if patterns.is_empty() {
-        Ok(format!("value-{row}"))
-    } else {
-        Ok("valid".to_string())
-    }
+    Err(PolarsError::ComputeError(
+        "Cannot synthesize a string satisfying every pattern in schema".into(),
+    ))
 }
 
 fn cast_to_dtype(series: Series, dtype: &DataType) -> PolarsResult<Series> {
@@ -339,17 +360,17 @@ fn int_range_i128(
     if lo <= hi {
         // Widen for unique() only on unbounded sides; a bounded window that
         // is too small is genuinely unsatisfiable for sampling.
-        if min_unique > 0 && ((hi - lo) as u128) < min_unique {
+        if min_unique > 0 && int_span(hi, lo) < min_unique {
             if !bounds.lo.is_finite() {
-                let room = ((hi - dmin).max(0)) as u128;
+                let room = int_span(hi, dmin);
                 lo = hi.saturating_sub(min_unique.min(room) as i128).max(dmin);
             } else if !bounds.hi.is_finite() {
-                let room = ((dmax - lo).max(0)) as u128;
+                let room = int_span(dmax, lo);
                 hi = lo.saturating_add(min_unique.min(room) as i128).min(dmax);
             } else {
                 return Err(unsatisfiable_bounds());
             }
-            if ((hi - lo).max(0) as u128) < min_unique {
+            if int_span(hi, lo) < min_unique {
                 return Err(unsatisfiable_bounds());
             }
         }
@@ -362,12 +383,12 @@ fn int_range_i128(
     if bounds.lo.is_finite() && !bounds.hi.is_finite() {
         lo = raw_lo.clamp(dmin, dmax);
         hi = lo
-            .saturating_add(span.min((dmax - lo).max(0) as u128) as i128)
+            .saturating_add(span.min(int_span(dmax, lo)) as i128)
             .min(dmax);
     } else if !bounds.lo.is_finite() && bounds.hi.is_finite() {
         hi = raw_hi.clamp(dmin, dmax);
         lo = hi
-            .saturating_sub(span.min((hi - dmin).max(0) as u128) as i128)
+            .saturating_sub(span.min(int_span(hi, dmin)) as i128)
             .max(dmin);
     } else {
         return Err(unsatisfiable_bounds());
@@ -386,6 +407,11 @@ fn int_range_u128(
 ) -> PolarsResult<(u128, u128)> {
     let bounds = numeric_bounds(specs);
     if bounds.lo == f64::INFINITY || bounds.hi == f64::NEG_INFINITY {
+        return Err(unsatisfiable_bounds());
+    }
+    // No unsigned value can satisfy an upper bound below zero (-0.0 still
+    // admits 0, since -0.0 == 0.0).
+    if bounds.hi.is_finite() && bounds.hi.floor() < 0.0 {
         return Err(unsatisfiable_bounds());
     }
     let raw_lo: u128 = if bounds.lo.is_finite() {
@@ -445,6 +471,14 @@ fn int_range_u128(
 
 fn unsatisfiable_bounds() -> PolarsError {
     PolarsError::ComputeError("Unsatisfiable numeric bounds in schema".into())
+}
+
+/// Width of `lo..=hi` as `u128`. Callers must ensure `lo <= hi`; the value
+/// is always exact because the widest `i128` span (`2^128 - 1`) fits in
+/// `u128`, unlike the plain subtraction which overflows and panics.
+fn int_span(hi: i128, lo: i128) -> u128 {
+    debug_assert!(lo <= hi);
+    (hi as u128).wrapping_sub(lo as u128)
 }
 
 /// Distinct values required beyond the first, so `unique()` columns can find
@@ -533,6 +567,12 @@ fn gen_scalar_series(
     }
 }
 
+/// Materialization ceiling for sampled list lengths. Open-ended schemas
+/// such as `ListLenBetween(1, usize::MAX)` would otherwise draw astronomic
+/// lengths and exhaust memory; every sampled length still satisfies the
+/// declared bounds.
+const MAX_SAMPLE_LIST_LEN: usize = 10_000;
+
 fn gen_list_series(
     rng: &mut ChaCha8Rng,
     name: &PlSmallStr,
@@ -554,6 +594,13 @@ fn gen_list_series(
             "Unsatisfiable list length bounds in schema".into(),
         ));
     }
+    if min_len > MAX_SAMPLE_LIST_LEN {
+        return Err(PolarsError::ComputeError(
+            format!("List length {min_len} exceeds generation capacity ({MAX_SAMPLE_LIST_LEN})")
+                .into(),
+        ));
+    }
+    let max_len = max_len.min(MAX_SAMPLE_LIST_LEN);
     let mut inners = Vec::with_capacity(n);
     for _ in 0..n {
         let len = if min_len == max_len {
@@ -616,24 +663,144 @@ fn gen_base_series(
     }
 }
 
-/// Uniqueness repair that preserves column checks (e.g. one_of domains).
+/// Whether a dtype has scalar values that can be harvested one by one for
+/// uniqueness repair. Nested dtypes keep the legacy whole-column resampling.
+fn is_scalar_dtype(dtype: &DataType) -> bool {
+    matches!(
+        dtype,
+        DataType::Boolean
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::Int128
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::UInt128
+            | DataType::Float16
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::String
+            | DataType::Date
+            | DataType::Datetime(_, _)
+            | DataType::Duration(_)
+            | DataType::Time
+            | DataType::Null
+    )
+}
+
+fn unique_impossible(check: &str) -> PolarsError {
+    PolarsError::ComputeError(
+        format!("Could not generate unique values for column ({check})").into(),
+    )
+}
+
+/// Uniqueness repair that preserves column checks.
+///
+/// Exact small domains resolve immediately: `one_of` pools shuffle-take,
+/// and provably impossible demands (`bool` with `n > 2`, pinned single
+/// floats, pattern-locked strings) error without sampling. Everything else
+/// harvests distinct values in batches with bounded total work, so narrow
+/// domains converge instead of relying on whole-column luck.
 fn ensure_unique(
     series: Series,
     rng: &mut ChaCha8Rng,
     dtype: &DataType,
     specs: &[CheckSpec],
 ) -> PolarsResult<Series> {
+    let n = series.len();
     let name = series.name().clone();
-    let mut current = series;
-    for _ in 0..(current.len() * 10 + 10) {
-        if current.n_unique().unwrap_or(0) == current.len() {
-            return Ok(current);
-        }
-        current = gen_scalar_series(rng, &name, dtype, specs, current.len())?;
+    if n <= 1 || is_unique(&series) {
+        return Ok(series);
     }
-    Err(PolarsError::ComputeError(
-        "Could not generate unique values for column".into(),
-    ))
+    if !is_scalar_dtype(dtype) {
+        // Nested values have no per-value sampler: bounded whole-column
+        // resampling, unchanged from before.
+        let mut current = series;
+        for _ in 0..200 {
+            if is_unique(&current) {
+                return Ok(current);
+            }
+            current = gen_scalar_series(rng, &name, dtype, specs, n)?;
+        }
+        return Err(unique_impossible("no unique combination found"));
+    }
+    if matches!(dtype, DataType::Boolean) && n > 2 {
+        return Err(unique_impossible("boolean domain holds 2 values"));
+    }
+    if is_pinned_float(dtype, specs) && n > 1 {
+        return Err(unique_impossible("bounds pin a single value"));
+    }
+    if matches!(dtype, DataType::String) {
+        if let Some(mut pool) = allowed_strings(specs)? {
+            // Exact membership domain: shuffle-take, or fail fast.
+            if pool.len() < n {
+                return Err(unique_impossible("membership domain too small"));
+            }
+            pool.shuffle(rng);
+            pool.truncate(n);
+            let out = Series::new(name.clone(), pool);
+            return cast_to_dtype(out, dtype);
+        }
+        if !matches_patterns(specs).is_empty() && n > 1 {
+            // Pattern-locked strings render identically on every draw.
+            return Err(unique_impossible("pattern-locked strings cannot vary"));
+        }
+    }
+    // Harvest distinct values in batches; every batch respects the checks,
+    // so the assembled column validates by construction.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut distinct: Vec<AnyValue<'static>> = Vec::with_capacity(n);
+    absorb_distinct(&series, &mut seen, &mut distinct);
+    for _ in 0..200 {
+        if distinct.len() >= n {
+            break;
+        }
+        let batch = (n - distinct.len()).max(8);
+        let fresh = gen_scalar_series(rng, &name, dtype, specs, batch)?;
+        absorb_distinct(&fresh, &mut seen, &mut distinct);
+    }
+    if distinct.len() < n {
+        return Err(unique_impossible("no unique combination found"));
+    }
+    distinct.shuffle(rng);
+    distinct.truncate(n);
+    let out = Series::from_any_values(name.clone(), &distinct, false)?;
+    cast_to_dtype(out, dtype)
+}
+
+fn is_unique(series: &Series) -> bool {
+    series.n_unique().unwrap_or(0) == series.len()
+}
+
+/// A float dtype is pinned when the bounds collapse to a single value.
+fn is_pinned_float(dtype: &DataType, specs: &[CheckSpec]) -> bool {
+    if !matches!(
+        dtype,
+        DataType::Float16 | DataType::Float32 | DataType::Float64
+    ) {
+        return false;
+    }
+    let bounds = numeric_bounds(specs);
+    bounds.lo == bounds.hi && bounds.lo_inclusive && bounds.hi_inclusive
+}
+
+fn absorb_distinct(
+    series: &Series,
+    seen: &mut HashSet<String>,
+    distinct: &mut Vec<AnyValue<'static>>,
+) {
+    for index in 0..series.len() {
+        let value = series.get(index).unwrap().into_static();
+        if matches!(value, AnyValue::Null) {
+            continue;
+        }
+        if seen.insert(format!("{value:?}")) {
+            distinct.push(value);
+        }
+    }
 }
 
 fn apply_nullable(series: Series, rng: &mut ChaCha8Rng, nullable: bool) -> PolarsResult<Series> {
@@ -844,11 +1011,21 @@ fn enforce_comparison(
     let right_kind = cell_kind(&right_spec.dtype)
         .ok_or_else(|| unsupported_comparison_column(right, &right_spec.dtype))?;
     // Mixed int/float pairs compare as floats, exactly like validation.
+    // Mixed temporal dtypes are rejected like validation: raw ticks from
+    // different units are not comparable.
+    if is_temporal_dtype(&left_spec.dtype)
+        && is_temporal_dtype(&right_spec.dtype)
+        && left_spec.dtype != right_spec.dtype
+    {
+        return Err(PolarsError::ComputeError(
+            format!("Cannot satisfy comparison '{left} {op:?} {right}': temporal columns must share a dtype").into(),
+        ));
+    }
     let kind = match (left_kind, right_kind) {
         (CellKind::Text, CellKind::Text) => CellKind::Text,
         (CellKind::UInt, CellKind::UInt) => CellKind::UInt,
-        (CellKind::Float, _) | (_, CellKind::Float) => CellKind::Float,
         (CellKind::Int, CellKind::Int) => CellKind::Int,
+        (left, right) if left != CellKind::Text && right != CellKind::Text => CellKind::Float,
         _ => {
             return Err(PolarsError::ComputeError(
                 format!("Cannot satisfy comparison '{left} {op:?} {right}': mismatched kinds")
@@ -1225,6 +1402,39 @@ mod tests {
             ],
         )]);
         assert!(sample(&schema, 5, 11).is_err());
+    }
+
+    #[test]
+    fn unique_converges_on_narrow_domains() {
+        use crate::checks::{BetweenF64, UniqueValues};
+        // between(0, 9) holds exactly 10 integers: an exact fit for n=10.
+        let schema = Schema::new(vec![ColumnSpec {
+            name: "value".to_string(),
+            dtype: DataType::Int64,
+            nullable: false,
+            checks: vec![
+                Box::new(UniqueValues),
+                Box::new(BetweenF64 {
+                    min_value: 0.0,
+                    max_value: 9.0,
+                }),
+            ],
+        }]);
+        let frame = sample(&schema, 10, 23).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+    }
+
+    #[test]
+    fn impossible_unique_demands_error_fast() {
+        use crate::checks::UniqueValues;
+        // Booleans hold 2 values; unique over 3 rows is impossible.
+        let schema = Schema::new(vec![ColumnSpec {
+            name: "flag".to_string(),
+            dtype: DataType::Boolean,
+            nullable: false,
+            checks: vec![Box::new(UniqueValues)],
+        }]);
+        assert!(sample(&schema, 3, 29).is_err());
     }
 
     #[test]

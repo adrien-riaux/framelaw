@@ -413,6 +413,21 @@ enum IntPredicate {
     OutsideCeilFloor(f64, f64),
 }
 
+/// Powers of two bounding the integer domains; exactly representable, so
+/// out-of-domain threshold checks below are exact, not approximate.
+const TWO_POW_127: f64 = 170141183460469231731687303715884105728.0;
+const TWO_POW_128: f64 = 340282366920938463463374607431768211456.0;
+
+/// How a predicate resolves against an integer domain before any casting.
+enum Resolved {
+    /// Every present value fails.
+    AllFail,
+    /// No value fails.
+    AllPass,
+    /// Compare against computed bounds normally.
+    Compare,
+}
+
 impl IntPredicate {
     fn thresholds_finite(&self) -> bool {
         match *self {
@@ -421,6 +436,87 @@ impl IntPredicate {
             | IntPredicate::LessThanCeil(v)
             | IntPredicate::GreaterThanFloor(v) => v.is_finite(),
             IntPredicate::OutsideCeilFloor(lo, hi) => lo.is_finite() && hi.is_finite(),
+        }
+    }
+
+    /// Resolves the predicate against the domain edges: `dmin` is the
+    /// smallest domain value and `above_max` the smallest f64 strictly
+    /// greater than every domain value (`0.0`/`2^128` for `u128`,
+    /// `-2^127`/`2^127` for signed). Thresholds outside the domain make the
+    /// predicate trivially true or false for every value, which saturating
+    /// casts alone would get wrong at the edges.
+    fn resolve(&self, dmin: f64, above_max: f64) -> Resolved {
+        // `fail iff x <= v` (gt) and `fail iff x < v` (gte) share their
+        // low-side behavior; `fail iff x >= v` (lt) and `fail iff x > v`
+        // (lte) share the high side. Strictness only matters for the
+        // boundary value itself, which saturation already handles.
+        let low_fail_all = |v: f64| v >= above_max;
+        let low_fail_none = |v: f64| v < dmin;
+        let high_fail_all = |v: f64| v <= dmin;
+        let high_fail_none = |v: f64| v >= above_max;
+        // Unsigned zero edge: `x <= -0.0` still fails for `x == 0`, but any
+        // strictly negative threshold is vacuous or total. The generic
+        // comparisons below already encode this via `dmin == 0.0`.
+        match *self {
+            IntPredicate::LessOrEqualFloor(v) => {
+                if low_fail_all(v) {
+                    Resolved::AllFail
+                } else if low_fail_none(v) {
+                    Resolved::AllPass
+                } else {
+                    Resolved::Compare
+                }
+            }
+            IntPredicate::LessThanCeil(v) => {
+                if low_fail_all(v) {
+                    Resolved::AllFail
+                } else if low_fail_none(v) {
+                    Resolved::AllPass
+                } else {
+                    Resolved::Compare
+                }
+            }
+            IntPredicate::GreaterOrEqualCeil(v) => {
+                if high_fail_all(v) {
+                    Resolved::AllFail
+                } else if high_fail_none(v) {
+                    Resolved::AllPass
+                } else {
+                    Resolved::Compare
+                }
+            }
+            IntPredicate::GreaterThanFloor(v) => {
+                if high_fail_all(v) {
+                    Resolved::AllFail
+                } else if high_fail_none(v) {
+                    Resolved::AllPass
+                } else {
+                    Resolved::Compare
+                }
+            }
+            IntPredicate::OutsideCeilFloor(lo, hi) => {
+                // Fail-all if either side fails everything; pass-all only if
+                // both sides are vacuous (vacuous sides are harmless below).
+                let lo_side = if lo >= above_max {
+                    Resolved::AllFail
+                } else if lo <= dmin {
+                    Resolved::AllPass
+                } else {
+                    Resolved::Compare
+                };
+                let hi_side = if hi < dmin {
+                    Resolved::AllFail
+                } else if hi >= above_max {
+                    Resolved::AllPass
+                } else {
+                    Resolved::Compare
+                };
+                match (lo_side, hi_side) {
+                    (Resolved::AllFail, _) | (_, Resolved::AllFail) => Resolved::AllFail,
+                    (Resolved::AllPass, Resolved::AllPass) => Resolved::AllPass,
+                    _ => Resolved::Compare,
+                }
+            }
         }
     }
 }
@@ -455,14 +551,34 @@ pub(crate) fn int_domain(dtype: &DataType) -> Option<IntDomain> {
 
 /// Evaluates a numeric failure predicate exactly for integer and temporal
 /// columns by widening to `i128`/`u128` and comparing against `floor`/`ceil`
-/// bounds (Rust `as` casts saturate, so out-of-range thresholds stay sound).
-/// Returns `None` for non-integer dtypes or non-finite thresholds, in which
-/// case callers fall back to the `f64` path.
+/// bounds. Out-of-domain thresholds resolve to trivial all-fail/all-pass
+/// masks first, so the saturating `as` casts below only ever see in-domain
+/// values. Returns `None` for non-integer dtypes or non-finite thresholds,
+/// in which case callers fall back to the `f64` path.
 fn int_fail_mask(series: &Series, pred: IntPredicate) -> Option<PolarsResult<BooleanChunked>> {
     if !pred.thresholds_finite() {
         return None;
     }
     let domain = int_domain(series.dtype())?;
+    // Thresholds outside the domain decide the whole mask without casting.
+    let (dmin, above_max) = match domain {
+        IntDomain::I128 => (-TWO_POW_127, TWO_POW_127),
+        IntDomain::U128 => (0.0, TWO_POW_128),
+    };
+    match pred.resolve(dmin, above_max) {
+        Resolved::AllFail => {
+            // Every present value fails; nulls stay unset and are skipped.
+            return Some(Ok(series.is_not_null()));
+        }
+        Resolved::AllPass => {
+            return Some(Ok(BooleanChunked::full(
+                series.name().clone(),
+                false,
+                series.len(),
+            )));
+        }
+        Resolved::Compare => {}
+    }
     let base = match series.dtype() {
         DataType::Date | DataType::Datetime(_, _) | DataType::Duration(_) | DataType::Time => {
             series.cast(&DataType::Int64).ok()?
@@ -824,6 +940,38 @@ mod tests {
 
         assert_eq!(gt_inf.validate("value", &series)[0].rows, vec![0, 1, 2]);
         assert!(gt_neg_inf.validate("value", &series).is_empty());
+    }
+
+    #[test]
+    fn unsigned_negative_thresholds_resolve_trivially() {
+        // No u128 is <= -0.5, so gt(-0.5) passes everything...
+        let series = Series::new("value".into(), [0u128, 1]);
+        let pass = GreaterThanF64 { min_value: -0.5 };
+        assert!(pass.validate("value", &series).is_empty());
+
+        // ...while lte(-0.5) fails everything (0 is not <= -0.5 either).
+        let fail = LessThanOrEqualF64 { max_value: -0.5 };
+        let errors = fail.validate("value", &series);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![0, 1]);
+    }
+
+    #[test]
+    fn signed_out_of_range_thresholds_resolve_trivially() {
+        let series = Series::new("value".into(), [i64::MIN, 0, i64::MAX]);
+        // Nothing exceeds 2^127.
+        let gt_huge = GreaterThanF64 {
+            min_value: 170141183460469231731687303715884105728.0,
+        };
+        assert_eq!(gt_huge.validate("value", &series)[0].rows, vec![0, 1, 2]);
+        // Every i64 is >= -2^127, so lt(-2^127) fails everything.
+        let lt_huge_neg = LessThanF64 {
+            max_value: -170141183460469231731687303715884105728.0,
+        };
+        assert_eq!(
+            lt_huge_neg.validate("value", &series)[0].rows,
+            vec![0, 1, 2]
+        );
     }
 
     #[test]

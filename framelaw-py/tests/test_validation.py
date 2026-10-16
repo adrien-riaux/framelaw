@@ -454,6 +454,7 @@ def test_nested_dtype_json_round_trip() -> None:
                 pl.Struct({"zip": pl.String, "codes": pl.List(pl.Int64)}),
                 checks=[fl.struct_field("zip", [fl.matches(r"^\d{5}$")])],
             ),
+            "nested": fl.Column(pl.Struct({"outer": pl.Struct({"a": pl.Int64})})),
         }
     )
     valid = pl.DataFrame(
@@ -463,8 +464,18 @@ def test_nested_dtype_json_round_trip() -> None:
                 {"zip": "75001", "codes": [1]},
                 {"zip": "69001", "codes": [2, 3]},
             ],
+            "nested": [{"outer": {"a": 1}}, {"outer": {"a": 2}}],
         }
     )
+    assert schema.validate(valid) is None
+    restored = fl.Schema.from_json(schema.to_json())
+    assert restored.validate(valid) is None
+
+
+def test_struct_names_with_separators_round_trip() -> None:
+    """Field names containing commas survive JSON persistence."""
+    schema = fl.Schema({"weird": fl.Column(pl.Struct({"a,b": pl.Int64}))})
+    valid = pl.DataFrame({"weird": [{"a,b": 1}]})
     assert schema.validate(valid) is None
     restored = fl.Schema.from_json(schema.to_json())
     assert restored.validate(valid) is None

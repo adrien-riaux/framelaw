@@ -70,18 +70,24 @@ fn infer_series_schema(series: &Series) -> ColumnSpec {
             }
         }
 
-        // 5. Strings: Regex patterns and Categories (OneOfString)
+        // 5. Strings: Regex patterns and Categories (OneOfString).
+        // Both branches need at least one non-null value: on all-null
+        // columns `n_unique` still counts the null, which would emit an
+        // empty OneOf set or a vacuously-matched regex.
         if let Ok(str_ca) = series.str() {
+            let has_values = str_ca.iter().flatten().next().is_some();
             // Heuristic for Enum / Categorical: at most 20 values and 5% of rows.
-            if n_unique > 0 && n_unique <= 20 && n_unique * 20 <= len {
+            if has_values && n_unique > 0 && n_unique <= 20 && n_unique * 20 <= len {
                 let mut unique_vals = HashSet::new();
                 for val in str_ca.iter().flatten() {
                     unique_vals.insert(val.to_string());
                 }
-                checks.push(Box::new(OneOfString {
-                    allowed_values: unique_vals,
-                }));
-            } else if n_unique > 0 {
+                if !unique_vals.is_empty() {
+                    checks.push(Box::new(OneOfString {
+                        allowed_values: unique_vals,
+                    }));
+                }
+            } else if has_values && n_unique > 0 {
                 // Infer a format only when every non-null value matches it.
                 let patterns = [
                     (
@@ -158,6 +164,31 @@ mod tests {
             .iter()
             .map(|check| check.spec())
             .collect()
+    }
+
+    #[test]
+    fn all_null_strings_infer_no_value_checks() {
+        use crate::checks::CheckSpec;
+        let df = DataFrame::new(
+            3,
+            vec![Series::new("code".into(), [None::<&str>, None, None]).into()],
+        )
+        .unwrap();
+
+        let specs: Vec<CheckSpec> = infer_schema(&df)
+            .columns
+            .into_iter()
+            .find(|spec| spec.name == "code")
+            .expect("column should be inferred")
+            .checks
+            .into_iter()
+            .map(|check| check.spec())
+            .collect();
+
+        assert!(!specs
+            .iter()
+            .any(|spec| matches!(spec, CheckSpec::OneOf(_) | CheckSpec::Matches(_))));
+        assert!(infer_schema(&df).validate(&df).is_valid());
     }
 
     #[test]
