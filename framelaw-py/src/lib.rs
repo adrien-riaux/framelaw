@@ -718,10 +718,14 @@ impl PySchema {
                 )))
             }
             polars::prelude::DataType::List(inner) => {
-                format!("List:{}", Self::dtype_name(inner)?)
+                format!("List:{}", Self::braced_nested(&Self::dtype_name(inner)?))
             }
             polars::prelude::DataType::Array(inner, width) => {
-                format!("Array:{}:{}", Self::dtype_name(inner)?, width)
+                format!(
+                    "Array:{}:{}",
+                    Self::braced_nested(&Self::dtype_name(inner)?),
+                    width
+                )
             }
             polars::prelude::DataType::Struct(fields) => {
                 let parts = fields
@@ -730,7 +734,7 @@ impl PySchema {
                         Ok(format!(
                             "{}={}",
                             Self::escape_name(field.name.as_str()),
-                            Self::dtype_name(&field.dtype)?
+                            Self::braced_nested(&Self::dtype_name(&field.dtype)?)
                         ))
                     })
                     .collect::<PyResult<Vec<_>>>()?;
@@ -782,11 +786,33 @@ impl PySchema {
             return Ok(dtype);
         }
         if let Some(inner) = name.strip_prefix("List:") {
+            // Braced payloads come from the current writer; bare payloads
+            // are historical tags, which take the whole remainder.
+            let inner = Self::strip_braces(inner).unwrap_or(inner);
             return Ok(polars::prelude::DataType::List(Box::new(
                 Self::parse_dtype_name(inner)?,
             )));
         }
         if let Some(rest) = name.strip_prefix("Array:") {
+            if let Some((inner, suffix)) = Self::split_braced_head(rest) {
+                let width: usize = suffix
+                    .strip_prefix(':')
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Unsupported JSON Polars dtype '{name}'"
+                        ))
+                    })?
+                    .parse()
+                    .map_err(|_| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Unsupported JSON Polars dtype '{name}'"
+                        ))
+                    })?;
+                return Ok(polars::prelude::DataType::Array(
+                    Box::new(Self::parse_dtype_name(inner)?),
+                    width,
+                ));
+            }
             let (inner_name, width) = rest.rsplit_once(':').ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(format!(
                     "Unsupported JSON Polars dtype '{name}'"
@@ -805,18 +831,18 @@ impl PySchema {
         if let Some(rest) = name.strip_prefix("Struct:") {
             let mut fields = Vec::new();
             if !rest.is_empty() {
-                for part in Self::split_escaped(rest, ',') {
-                    let (field_name, field_dtype) = Self::split_first_unescaped(&part, '=')
-                        .ok_or_else(|| {
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "Unsupported JSON Polars dtype '{name}'"
-                            ))
-                        })?;
+                for part in Self::split_top_level(rest) {
+                    let (field_name, field_dtype) = Self::split_field(&part).ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "Unsupported JSON Polars dtype '{name}'"
+                        ))
+                    })?;
+                    // Braced payloads come from the current writer; bare
+                    // payloads are historical tags, parsed as a whole.
+                    let field_dtype = Self::strip_braces(&field_dtype).unwrap_or(&field_dtype);
                     fields.push(polars::prelude::Field::new(
                         Self::unescape(&field_name).into(),
-                        // Dtype tags keep their escapes: each recursion level
-                        // unescapes only its own field names.
-                        Self::parse_dtype_name(&field_dtype)?,
+                        Self::parse_dtype_name(field_dtype)?,
                     ));
                 }
             }
@@ -838,13 +864,27 @@ impl PySchema {
         )))
     }
 
-    /// Escapes a struct field name for the `Struct:` tag encoding. Commas
-    /// and `=` would otherwise parse as structural separators; backslashes
-    /// are escaped first so unescaping is unambiguous.
+    /// Escapes a struct field name for dtype tags. Separators (`,`, `=`),
+    /// braces, and backslashes would otherwise parse as structure;
+    /// backslashes are escaped first so unescaping is unambiguous.
     fn escape_name(name: &str) -> String {
         name.replace('\\', "\\\\")
             .replace(',', "\\,")
             .replace('=', "\\=")
+            .replace('{', "\\{")
+            .replace('}', "\\}")
+    }
+
+    /// Wraps a composite child dtype tag in braces when it contains
+    /// structural characters, so enclosing comma-separated lists stay
+    /// unambiguous at any nesting depth. Scalar tags pass through, keeping
+    /// historical payloads byte-identical.
+    fn braced_nested(tag: &str) -> String {
+        if tag.contains([',', '{', '}']) {
+            format!("{{{tag}}}")
+        } else {
+            tag.to_string()
+        }
     }
 
     /// Reverses `escape_name`: `\x` becomes `x` for any `x`.
@@ -863,19 +903,26 @@ impl PySchema {
         out
     }
 
-    /// Splits on unescaped delimiters, keeping escape sequences intact for
-    /// deeper recursion levels to interpret.
-    fn split_escaped(value: &str, delimiter: char) -> Vec<String> {
+    /// Splits a struct payload on top-level commas, skipping braced regions
+    /// and backslash escape pairs.
+    fn split_top_level(value: &str) -> Vec<String> {
         let mut parts = Vec::new();
         let mut current = String::new();
         let mut chars = value.chars().peekable();
+        let mut depth = 0usize;
         while let Some(char) = chars.next() {
             if char == '\\' {
                 current.push(char);
                 if let Some(next) = chars.next() {
                     current.push(next);
                 }
-            } else if char == delimiter {
+            } else if char == '{' {
+                depth += 1;
+                current.push(char);
+            } else if char == '}' {
+                depth = depth.saturating_sub(1);
+                current.push(char);
+            } else if char == ',' && depth == 0 {
                 parts.push(std::mem::take(&mut current));
             } else {
                 current.push(char);
@@ -885,17 +932,24 @@ impl PySchema {
         parts
     }
 
-    /// Splits on the first unescaped `=` into (name, rest).
-    fn split_first_unescaped(value: &str, delimiter: char) -> Option<(String, String)> {
+    /// Splits one `name=dtype` field on the first top-level `=`.
+    fn split_field(value: &str) -> Option<(String, String)> {
         let mut name = String::new();
         let mut chars = value.chars().peekable();
+        let mut depth = 0usize;
         while let Some(char) = chars.next() {
             if char == '\\' {
                 name.push(char);
                 if let Some(next) = chars.next() {
                     name.push(next);
                 }
-            } else if char == delimiter {
+            } else if char == '{' {
+                depth += 1;
+                name.push(char);
+            } else if char == '}' {
+                depth = depth.saturating_sub(1);
+                name.push(char);
+            } else if char == '=' && depth == 0 {
                 let rest: String = chars.collect();
                 return Some((name, rest));
             } else {
@@ -903,6 +957,56 @@ impl PySchema {
             }
         }
         None
+    }
+
+    /// Strips one layer of surrounding braces, requiring them to balance
+    /// over the whole string (escapes respected).
+    fn strip_braces(value: &str) -> Option<&str> {
+        let inner = value.strip_prefix('{')?.strip_suffix('}')?;
+        let mut depth = 0usize;
+        let mut chars = inner.chars().peekable();
+        while let Some(char) = chars.next() {
+            if char == '\\' {
+                chars.next();
+            } else if char == '{' {
+                depth += 1;
+            } else if char == '}' {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+        }
+        (depth == 0).then_some(inner)
+    }
+
+    /// Splits a leading `{...}` balanced group into its inner payload and
+    /// the remainder, respecting backslash escapes.
+    fn split_braced_head(value: &str) -> Option<(&str, &str)> {
+        let rest = value.strip_prefix('{')?;
+        let mut depth = 0usize;
+        let mut end = None;
+        let mut chars = rest.char_indices().peekable();
+        while let Some((index, char)) = chars.next() {
+            if char == '\\' {
+                chars.next();
+            } else if char == '{' {
+                depth += 1;
+            } else if char == '}' {
+                if depth == 0 {
+                    end = Some(index);
+                    break;
+                }
+                depth -= 1;
+            }
+        }
+        let end = end?;
+        // Byte indices align: braces and backslashes are single-byte, and
+        // only ASCII is special to this scanner.
+        if !rest.is_char_boundary(end) {
+            return None;
+        }
+        Some((&rest[..end], &rest[end + 1..]))
     }
 
     fn parse_time_unit(value: &str) -> PyResult<polars::prelude::TimeUnit> {

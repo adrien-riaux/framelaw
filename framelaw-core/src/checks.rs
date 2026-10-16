@@ -447,13 +447,15 @@ impl IntPredicate {
     /// casts alone would get wrong at the edges.
     fn resolve(&self, dmin: f64, above_max: f64) -> Resolved {
         // `fail iff x <= v` (gt) and `fail iff x < v` (gte) share their
-        // low-side behavior; `fail iff x >= v` (lt) and `fail iff x > v`
-        // (lte) share the high side. Strictness only matters for the
-        // boundary value itself, which saturation already handles.
+        // low-side behavior. On the high side, `fail iff x >= v` (lt) fails
+        // everything at `v == dmin`, but `fail iff x > v` (lte) still
+        // passes the boundary value there — strictness matters exactly at
+        // the edge, so lte gets its own strict comparison.
         let low_fail_all = |v: f64| v >= above_max;
         let low_fail_none = |v: f64| v < dmin;
         let high_fail_all = |v: f64| v <= dmin;
         let high_fail_none = |v: f64| v >= above_max;
+        let lte_fail_all = |v: f64| v < dmin;
         // Unsigned zero edge: `x <= -0.0` still fails for `x == 0`, but any
         // strictly negative threshold is vacuous or total. The generic
         // comparisons below already encode this via `dmin == 0.0`.
@@ -486,7 +488,7 @@ impl IntPredicate {
                 }
             }
             IntPredicate::GreaterThanFloor(v) => {
-                if high_fail_all(v) {
+                if lte_fail_all(v) {
                     Resolved::AllFail
                 } else if high_fail_none(v) {
                     Resolved::AllPass
@@ -940,6 +942,18 @@ mod tests {
 
         assert_eq!(gt_inf.validate("value", &series)[0].rows, vec![0, 1, 2]);
         assert!(gt_neg_inf.validate("value", &series).is_empty());
+    }
+
+    #[test]
+    fn lte_at_domain_minimum_passes_the_boundary_value() {
+        // lte(0) on unsigned: 0 itself satisfies x <= 0, only larger fail.
+        let series = Series::new("value".into(), [0u128, 1]);
+        let check = LessThanOrEqualF64 { max_value: 0.0 };
+
+        let errors = check.validate("value", &series);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![1]);
     }
 
     #[test]

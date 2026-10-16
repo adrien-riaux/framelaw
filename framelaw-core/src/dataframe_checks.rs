@@ -62,6 +62,36 @@ pub(crate) fn is_temporal_dtype(dtype: &DataType) -> bool {
     )
 }
 
+/// Extracts signed values exactly (`i128` domain; temporal via `Int64`).
+pub(crate) fn int128_cells(series: &Series) -> PolarsResult<Vec<Option<i128>>> {
+    let base = match series.dtype() {
+        DataType::Date | DataType::Datetime(_, _) | DataType::Duration(_) | DataType::Time => {
+            series.cast(&DataType::Int64)?
+        }
+        _ => series.clone(),
+    };
+    Ok(base.cast(&DataType::Int128)?.i128()?.iter().collect())
+}
+
+/// Extracts unsigned values exactly (`u128` domain).
+pub(crate) fn uint128_cells(series: &Series) -> PolarsResult<Vec<Option<u128>>> {
+    Ok(series.cast(&DataType::UInt128)?.u128()?.iter().collect())
+}
+
+/// Total order between a signed and an unsigned value with no rounding:
+/// negatives sort below everything, values above `i128::MAX` above everything.
+pub(crate) fn cmp_mixed_int_uint(signed: i128, unsigned: u128) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if signed < 0 || unsigned > i128::MAX as u128 {
+        Ordering::Less
+    } else {
+        (signed as u128).cmp(&unsigned)
+    }
+}
+
+/// Extracted values for a mixed signed/unsigned comparison.
+type MixedPairValues = (Vec<Option<i128>>, Vec<Option<u128>>);
+
 /// Declarative comparison between two columns, e.g. `start < end`.
 /// Nulls on either side skip the row; use nullable=false for strictness.
 pub struct ColumnComparison {
@@ -127,6 +157,66 @@ impl ColumnComparison {
                     .enumerate()
                     .filter_map(|(index, value)| match value {
                         Some(false) => Some(index),
+                        _ => None,
+                    })
+                    .collect();
+                comparison_result(self, failed)
+            }
+            Err(error) => vec![ValidationError::multi(
+                vec![self.left.clone(), self.right.clone()],
+                self.name(),
+                vec![],
+                format!(
+                    "Failed to compare '{}' and '{}': {error}",
+                    self.left, self.right
+                ),
+            )],
+        }
+    }
+
+    /// Exact comparison for mixed signed/unsigned pairs, which share no
+    /// lossless primitive domain. `left_signed` records which side holds
+    /// the signed values so the operator direction stays correct.
+    fn validate_mixed_pair(
+        &self,
+        left: &Series,
+        right: &Series,
+        left_signed: bool,
+    ) -> Vec<ValidationError> {
+        use std::cmp::Ordering;
+        let extracted: PolarsResult<MixedPairValues> = (|| {
+            if left_signed {
+                Ok((int128_cells(left)?, uint128_cells(right)?))
+            } else {
+                Ok((int128_cells(right)?, uint128_cells(left)?))
+            }
+        })();
+        match extracted {
+            Ok((signed_vals, unsigned_vals)) => {
+                let failed: Vec<usize> = signed_vals
+                    .iter()
+                    .zip(unsigned_vals.iter())
+                    .enumerate()
+                    .filter_map(|(index, pair)| match pair {
+                        (Some(a), Some(b)) => {
+                            let order = cmp_mixed_int_uint(*a, *b);
+                            // `order` is signed-vs-unsigned; flip it when the
+                            // unsigned side is on the left.
+                            let order = if left_signed { order } else { order.reverse() };
+                            let holds = match self.op {
+                                CompareOp::Lt => order == Ordering::Less,
+                                CompareOp::Le => order != Ordering::Greater,
+                                CompareOp::Gt => order == Ordering::Greater,
+                                CompareOp::Ge => order != Ordering::Less,
+                                CompareOp::Eq => order == Ordering::Equal,
+                                CompareOp::Ne => order != Ordering::Equal,
+                            };
+                            if holds {
+                                None
+                            } else {
+                                Some(index)
+                            }
+                        }
                         _ => None,
                     })
                     .collect();
@@ -220,6 +310,18 @@ impl DataFrameCheck for ColumnComparison {
             && int_domain(right.dtype()) == Some(IntDomain::U128)
         {
             return self.validate_int_pair(&left, &right, true);
+        }
+        // Mixed signed/unsigned pairs share no lossless primitive domain;
+        // compare exactly value by value instead of rounding through f64.
+        if int_domain(left.dtype()) == Some(IntDomain::I128)
+            && int_domain(right.dtype()) == Some(IntDomain::U128)
+        {
+            return self.validate_mixed_pair(&left, &right, true);
+        }
+        if int_domain(left.dtype()) == Some(IntDomain::U128)
+            && int_domain(right.dtype()) == Some(IntDomain::I128)
+        {
+            return self.validate_mixed_pair(&left, &right, false);
         }
         let (Ok(left_num), Ok(right_num)) = (numeric_series(&left), numeric_series(&right)) else {
             return vec![ValidationError::multi(
@@ -433,6 +535,34 @@ mod tests {
         let errors = check.validate(&df);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("must share a dtype"));
+    }
+
+    #[test]
+    fn mixed_i128_u128_compares_exactly() {
+        // 2^127 - 1 < 2^127: distinct in integers, equal in f64.
+        let df = DataFrame::new(
+            2,
+            vec![
+                Series::new("a".into(), [i128::MAX, i128::MAX]).into(),
+                Series::new("b".into(), [1u128 << 127, 1u128 << 127]).into(),
+            ],
+        )
+        .unwrap();
+        let check = ColumnComparison {
+            left: "a".to_string(),
+            op: CompareOp::Lt,
+            right: "b".to_string(),
+        };
+        assert!(check.validate(&df).is_empty());
+
+        let flipped = ColumnComparison {
+            left: "b".to_string(),
+            op: CompareOp::Lt,
+            right: "a".to_string(),
+        };
+        let errors = flipped.validate(&df);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![0, 1]);
     }
 
     #[test]

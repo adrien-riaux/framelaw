@@ -9,7 +9,10 @@ use regex::Regex;
 
 use crate::checks::{is_supported_numeric_dtype, CheckSpec};
 use crate::column::ColumnSpec;
-use crate::dataframe_checks::{is_temporal_dtype, CompareOp, DataFrameCheckSpec};
+use crate::dataframe_checks::{
+    cmp_mixed_int_uint, int128_cells, is_temporal_dtype, uint128_cells, CompareOp,
+    DataFrameCheckSpec,
+};
 use crate::schema::Schema;
 
 /// Known string patterns from inference: generate a canned valid value.
@@ -1025,6 +1028,17 @@ fn enforce_comparison(
         (CellKind::Text, CellKind::Text) => CellKind::Text,
         (CellKind::UInt, CellKind::UInt) => CellKind::UInt,
         (CellKind::Int, CellKind::Int) => CellKind::Int,
+        (CellKind::Int, CellKind::UInt) | (CellKind::UInt, CellKind::Int) => {
+            return enforce_mixed_int(
+                frame,
+                lookup,
+                rng,
+                left,
+                right,
+                op,
+                left_kind == CellKind::UInt,
+            );
+        }
         (left, right) if left != CellKind::Text && right != CellKind::Text => CellKind::Float,
         _ => {
             return Err(PolarsError::ComputeError(
@@ -1072,6 +1086,97 @@ fn enforce_comparison(
                 replace_row(frame, lookup, right, row, &right_candidate)?;
                 left_cells[row] = left_cell;
                 right_cells[row] = right_cell;
+                satisfied = true;
+                break;
+            }
+        }
+        if !satisfied {
+            return Err(PolarsError::ComputeError(
+                format!("Could not satisfy comparison '{left} {op:?} {right}'").into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Enforces a comparison between a signed column and an unsigned one using
+/// the exact mixed ordering (mirrors validation). `left_uint` records which
+/// side holds the unsigned values so candidates map back correctly.
+#[allow(clippy::too_many_arguments)]
+fn enforce_mixed_int(
+    frame: &mut HashMap<String, Series>,
+    lookup: &HashMap<&str, &ColumnSpec>,
+    rng: &mut ChaCha8Rng,
+    left: &str,
+    right: &str,
+    op: CompareOp,
+    left_uint: bool,
+) -> PolarsResult<()> {
+    use std::cmp::Ordering;
+    let n = frame
+        .get(left)
+        .ok_or_else(|| missing_sample_column(left))?
+        .len();
+    // Each vector holds one side's values; `holds` maps them back to
+    // left-vs-right order via `left_uint`.
+    let (mut signed_vals, mut unsigned_vals) = if left_uint {
+        (
+            int128_cells(
+                frame
+                    .get(right)
+                    .ok_or_else(|| missing_sample_column(right))?,
+            )?,
+            uint128_cells(frame.get(left).ok_or_else(|| missing_sample_column(left))?)?,
+        )
+    } else {
+        (
+            int128_cells(frame.get(left).ok_or_else(|| missing_sample_column(left))?)?,
+            uint128_cells(
+                frame
+                    .get(right)
+                    .ok_or_else(|| missing_sample_column(right))?,
+            )?,
+        )
+    };
+    let holds = |signed: &Option<i128>, unsigned: &Option<u128>| match (signed, unsigned) {
+        (Some(a), Some(b)) => {
+            let order = cmp_mixed_int_uint(*a, *b);
+            let order = if left_uint { order.reverse() } else { order };
+            match op {
+                CompareOp::Lt => order == Ordering::Less,
+                CompareOp::Le => order != Ordering::Greater,
+                CompareOp::Gt => order == Ordering::Greater,
+                CompareOp::Ge => order != Ordering::Less,
+                CompareOp::Eq => order == Ordering::Equal,
+                CompareOp::Ne => order != Ordering::Equal,
+            }
+        }
+        _ => true,
+    };
+    for row in 0..n {
+        if holds(&signed_vals[row], &unsigned_vals[row]) {
+            continue;
+        }
+        let mut satisfied = false;
+        for _ in 0..200 {
+            let left_candidate = resample_one(rng, lookup, left)?;
+            let right_candidate = resample_one(rng, lookup, right)?;
+            let (signed_candidate, unsigned_candidate) = if left_uint {
+                (
+                    int128_cells(&right_candidate)?.into_iter().next().unwrap(),
+                    uint128_cells(&left_candidate)?.into_iter().next().unwrap(),
+                )
+            } else {
+                (
+                    int128_cells(&left_candidate)?.into_iter().next().unwrap(),
+                    uint128_cells(&right_candidate)?.into_iter().next().unwrap(),
+                )
+            };
+            if holds(&signed_candidate, &unsigned_candidate) {
+                replace_row(frame, lookup, left, row, &left_candidate)?;
+                replace_row(frame, lookup, right, row, &right_candidate)?;
+                signed_vals[row] = signed_candidate;
+                unsigned_vals[row] = unsigned_candidate;
                 satisfied = true;
                 break;
             }

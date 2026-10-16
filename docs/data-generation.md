@@ -20,9 +20,12 @@ assert schema.validate(frame) is None
 
 - Numerics (incl. temporal): uniform within the intersection of
   `gt`/`gte`/`lt`/`lte`/`between` bounds.
-- `one_of`: random pick from the allowed set.
+- `one_of`: random pick from the allowed set, intersected with any
+  `matches` patterns (empty intersections error).
 - `matches`: canned valid values for known patterns (email, URL, ISO date,
-  UUID, 5-digit zip, 2-letter code); `"valid"` otherwise.
+  UUID, 5-digit zip, 2-letter code). A pattern with no known canned value,
+  or a set of patterns no single canned value satisfies, raises a
+  cannot-synthesize error instead of emitting potentially invalid data.
 - `unique` / `unique_together`: repaired by resampling.
 - `nullable=True`: ~5% nulls injected (never for unique columns).
 - Lists/arrays: lengths within the inferred or declared bounds; structs built
@@ -32,7 +35,9 @@ assert schema.validate(frame) is None
 
 ## Limits
 
-- One nesting level; full regex synthesis is out of scope (unknown patterns
-  fall back to `"valid"`, which may not satisfy an exotic regex).
+- One nesting level; full regex synthesis is out of scope (patterns without
+  a known canned value raise a cannot-synthesize error).
 - Contradictory schemas (e.g. `gt(10)` combined with `lt(0)`, or an
   unsatisfiable `unique`) raise `ValueError` instead of returning data.
+- Sampled list lengths are capped for materialization safety; schemas
+  demanding huge lists report a generation-capacity error.

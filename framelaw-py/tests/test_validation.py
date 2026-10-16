@@ -455,6 +455,8 @@ def test_nested_dtype_json_round_trip() -> None:
                 checks=[fl.struct_field("zip", [fl.matches(r"^\d{5}$")])],
             ),
             "nested": fl.Column(pl.Struct({"outer": pl.Struct({"a": pl.Int64})})),
+            "deep": fl.Column(pl.Struct({"outer": pl.Struct({"a": pl.Int64, "b": pl.String})})),
+            "deeper": fl.Column(pl.Struct({"l1": pl.Struct({"l2": pl.Struct({"x": pl.Int64})})})),
         }
     )
     valid = pl.DataFrame(
@@ -465,6 +467,11 @@ def test_nested_dtype_json_round_trip() -> None:
                 {"zip": "69001", "codes": [2, 3]},
             ],
             "nested": [{"outer": {"a": 1}}, {"outer": {"a": 2}}],
+            "deep": [
+                {"outer": {"a": 1, "b": "x"}},
+                {"outer": {"a": 2, "b": "y"}},
+            ],
+            "deeper": [{"l1": {"l2": {"x": 1}}}, {"l1": {"l2": {"x": 2}}}],
         }
     )
     assert schema.validate(valid) is None
