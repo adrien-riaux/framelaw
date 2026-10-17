@@ -1,1 +1,54 @@
-/target
+# Rust / Cargo
+/target/
+**/target/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.hypothesis/
+
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Python packages and build outputs
+build/
+dist/
+*.egg-info/
+*.whl
+*.so
+
+# Coverage and test reports
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+pytestdebug.log
+
+# macOS
+.DS_Store
+.AppleDB
+.AppleDesktop
+.LSOverride
+Icon
+._*
+
+# Editors and local tooling
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example

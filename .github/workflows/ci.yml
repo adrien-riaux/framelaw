@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  quality:
+    name: Lint and static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Ruff lint and format check
+        run: |
+          uvx ruff check framelaw-py examples
+          uvx ruff format --check framelaw-py examples
+      - name: Type check
+        run: |
+          test -d .venv || uv venv
+          uv pip install -q ty polars pydantic
+          uv run ty check --extra-search-path framelaw-py/python framelaw-py/python examples
+      - name: Docstring coverage
+        run: uvx interrogate framelaw-py/python examples
+
+  test:
+    name: Build and test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Create venv and build extension
+        run: |
+          test -d .venv || uv venv
+          uv pip install -e ./framelaw-py
+      - name: Rust tests
+        run: cargo test -p framelaw-core
+      - name: Examples smoke test
+        run: |
+          for example in examples/*.py; do
+            uv run --with-editable ./framelaw-py python "$example"
+          done
