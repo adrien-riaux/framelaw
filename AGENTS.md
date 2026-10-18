@@ -27,7 +27,7 @@ Module map (`framelaw-core/src`):
 
 **Coding Standards**
 - **Rust**: Strict `rustfmt` and aggressive `clippy` (`cargo clippy --all-targets -- -D warnings`). Keep code idiomatic and memory-efficient (zero-allocation where possible; prefer borrows/lifetimes over cloning).
-- **Python**: `ruff` for formatting and linting, `ty check` clean, `interrogate` at 100% for `framelaw-py/python` and `examples/`.
+- **Python**: `ruff` for formatting and linting, `ty check` clean, `interrogate` at 100% for `framelaw-py/python` and `scripts/`.
 - **Type stubs**: `framelaw-py/python/framelaw/_framelaw.pyi` mirrors the native module for checkers and IDEs. Keep it in sync with `framelaw-py/src/lib.rs` whenever signatures change (runtime ignores it; `ty` requires it).
 - **Testing**: Pure Rust unit tests inside `framelaw-core`. Python API integration tests using `pytest` for `framelaw-py`.
 
@@ -36,7 +36,7 @@ Module map (`framelaw-core/src`):
 - **Pydantic Focus**: Prioritize `pydantic-core` at the Rust layer for handling schema derivation rather than reflecting Python `BaseModel`s via Python FFI.
 - **New checks checklist**: every new check needs all of: core struct + `CheckSpec` variant (+ `check_from_spec` if nestable), Python constructor in `framelaw-py/src/lib.rs`, `JsonCheck` round-trip, stub entry in `_framelaw.pyi`, `__init__.py` export, docs in `docs/checks.md` (or the relevant page), and tests on both sides.
 - **JSON compatibility**: schema JSON is at v2 and loads v1. Never break loading older payloads; bump the version only with a migration path.
-- **Examples**: live in `examples/`, named by capability (never by milestone). Each is runnable (`uv run --with-editable ./framelaw-py python examples/<name>.py`), self-asserting, with `def main() -> None`, full docstrings, and `Optional`-narrowing asserts before touching `validate()` results.
+- **Scripts**: smoke tests and benchmarks live in `scripts/`, named by capability (never by milestone). Each is runnable (`uv run --with-editable ./framelaw-py python scripts/<name>.py`), self-asserting, with `def main() -> None`, full docstrings, and `Optional`-narrowing asserts before touching `validate()` results.
 - **Docs**: live in `docs/*.md`. Every code snippet must actually execute against the built extension before committing — dtype mismatches (e.g. `Int32` vs inferred `Int64`) are the classic failure.
 - **CHANGELOG**: add an entry under the unreleased section for every user-facing change.
 - **Iterative Work**: Always work step-by-step. Propose and confirm architectural setup before writing large boilerplate blocks.
@@ -46,7 +46,7 @@ Module map (`framelaw-core/src`):
 - `make build-release` — optimized `--release` install for benchmarks.
 - `make test` — `cargo test -p framelaw-core` + pytest suite.
 - `make lint` — full verify: clippy, ruff, `ty`, interrogate.
-- `make test` — Rust + Python suites; `make examples` runs every example.
+- `make test` — Rust + Python suites; `make scripts` runs every script.
 - `make wheel` / `make publish` — release wheel build / TestPyPI upload.
 
 **References**
