@@ -34,7 +34,7 @@ framelaw/
 | Schema JSON | `serde` + `serde_json` parsing, `jiter` pre-validation |
 | Python bindings | `pyo3` + `pyo3-polars` (zero-copy frame/dtype exchange) |
 | Sampling RNG | `rand` / `rand_chacha` (seeded, reproducible) |
-| Build | `maturin` via `uv pip install -e ./framelaw-py` |
+| Build | `maturin` via `uv pip install -e "./framelaw-py[dev]"` |
 
 ## Design notes
 
@@ -55,13 +55,13 @@ make build          # editable debug install (fast iteration)
 make build-release  # optimized --release install (benchmarks, profiling)
 make test           # cargo tests + pytest suite
 make lint           # full verify: clippy, ruff, ty, interrogate
-make examples       # run every example script
+make scripts        # run every smoke-test / benchmark script
 ```
 
 Editable installs build Rust in **debug** mode: fast to compile, slow to
 run. Published wheels (`make wheel`, CI) always use `--release`. Never
 quote benchmark numbers from a debug build — run `make build-release`
-first (see `examples/benchmark.py`).
+first (see `scripts/benchmark.py`).
 
 Rust code follows `rustfmt` + strict `clippy`; Python follows `ruff`.
 Core logic carries Rust unit tests in each module; the public API is covered

@@ -57,6 +57,9 @@ across columns and table checks.
 
 ### Compatibility
 
+- Full numeric dtype coverage: every signed/unsigned integer width
+  (including `Int128`/`UInt128`, compared exactly) and
+  `Float16`/`Float32`/`Float64`.
 - Accepts Polars `DataFrame` and `LazyFrame` (collected internally);
   `Schema.from_polars_schema()` derives from a native Polars schema dict.
 - Pydantic v2 `Schema.from_pydantic(Model)`: `int`/`float`/`str`/`bool`,

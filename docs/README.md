@@ -38,7 +38,5 @@ Workflows:
 Reference & project:
 
 - [API reference](api-reference.md) — complete class and function reference.
-- [Examples](examples.md) — walkthrough of the runnable scripts in
-  `examples/`.
 - [Architecture](architecture.md) — how the Rust workspace is organized.
 - [Changelog](../CHANGELOG.md) — release history.

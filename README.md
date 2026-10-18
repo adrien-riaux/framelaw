@@ -6,7 +6,7 @@ Polars, exposed to Python.
 FrameLaw validates Polars `DataFrame`s against a schema — column types,
 nullability, value constraints, and cross-column rules — in parallel Rust,
 behind a Pandera-like Python API. On a 2M-row mixed workload it validates at
-≈30M rows/s (Apple Silicon; reproduce with `examples/benchmark.py` on a
+≈30M rows/s (Apple Silicon; reproduce with `scripts/benchmark.py` on a
 `make build-release` install).
 
 ## Features
@@ -24,11 +24,13 @@ behind a Pandera-like Python API. On a 2M-row mixed workload it validates at
 
 ## Install
 
-Requires Python 3.10+ and a Rust toolchain. From the repository root:
-
 ```bash
-uv pip install -e ./framelaw-py
+uv add framelaw
 ```
+
+FrameLaw is published on PyPI and ships prebuilt wheels for the native Rust
+extension, so no Rust toolchain is needed. It requires Python 3.10+ and pulls
+in its Python dependencies (`polars>=1.0`, `pydantic>=2`) automatically.
 
 ## Quickstart
 
@@ -70,7 +72,7 @@ Column 'country': rows [2], check 'OneOfString': Values in 'country' are not par
 Full docs live in [`docs/`](docs/README.md): quickstart, schemas, every
 check, cross-column and nested validation, error reports, inference, lazy
 mode, data generation, Pydantic and Polars integration, serialization, API
-reference, runnable examples, and architecture notes.
+reference, and architecture notes.
 
 ## Development
 
@@ -78,7 +80,7 @@ reference, runnable examples, and architecture notes.
 make build     # editable debug install
 make test      # Rust + Python suites
 make lint      # clippy, ruff, ty, interrogate
-make examples  # smoke-test every example script
+make scripts   # smoke-test every script
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full contributor workflow.
