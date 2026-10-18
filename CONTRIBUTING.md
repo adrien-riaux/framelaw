@@ -24,7 +24,7 @@ make test    # confirm green before changing anything
 4. Update the user-facing surface alongside the code: `docs/` pages,
    `docs/api-reference.md`, `framelaw-py/python/framelaw/_framelaw.pyi`
    (native signatures), and `CHANGELOG.md` (newest entry on top).
-5. Run `make lint`, `make test`, and `make examples` locally. Open a PR against `dev`; CI runs the same gate
+5. Run `make lint`, `make test`, and `make scripts` locally. Open a PR against `dev`; CI runs the same gate
    plus the Python 3.10–3.14 matrix.
 
 ## Standards
@@ -32,13 +32,13 @@ make test    # confirm green before changing anything
 - **Rust**: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`.
   Idiomatic, allocation-aware code; borrows over clones.
 - **Python**: `ruff check`, `ruff format --check`, `ty check` clean,
-  `interrogate` at 100% for `framelaw-py/python` and `examples/`.
+  `interrogate` at 100% for `framelaw-py/python` and `scripts/`.
 - **Separation**: `framelaw-core` must never import PyO3/Python types.
 - **New checks** require: core struct + `CheckSpec` variant, Python
   constructor, `JsonCheck` round-trip, stub entry, `__init__.py` export,
   docs, and tests on both sides.
 - **Schemas**: JSON stays backward-compatible (current writer is v2, loader
-  accepts v1+). Examples in `examples/` are capability-named, runnable,
+  accepts v1+). Scripts in `scripts/` are capability-named, runnable,
   self-asserting, and must exit 0. Every docs snippet must execute against
   the built extension before committing.
 
@@ -46,7 +46,7 @@ make test    # confirm green before changing anything
 
 Editable installs compile Rust in **debug** mode. Never quote benchmark
 numbers from one — run `make build-release` first and use
-`examples/benchmark.py`. Published wheels always build with `--release`.
+`scripts/benchmark.py`. Published wheels always build with `--release`.
 
 ## Releases
 

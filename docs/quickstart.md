@@ -2,18 +2,13 @@
 
 ## Install
 
-FrameLaw's Python package is built from Rust with
-[maturin](https://www.maturin.rs/), so you need a Rust toolchain installed.
-Then, from the repository root:
-
 ```bash
-uv pip install -e ./framelaw-py
+uv add framelaw
 ```
 
-This builds the native extension and installs the `framelaw` package alongside
-its Python dependencies (`polars>=1.0`, `pydantic>=2`).
-
-Requires Python 3.10+.
+FrameLaw is published on PyPI and ships prebuilt wheels for the native Rust
+extension, so no Rust toolchain is needed. It requires Python 3.10+ and pulls
+in its Python dependencies (`polars>=1.0`, `pydantic>=2`) automatically.
 
 ## Validate your first DataFrame
 

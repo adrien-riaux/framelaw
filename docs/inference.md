@@ -22,7 +22,7 @@ schema.validate(df)  # raises if anything fails
 |---|---|
 | `dtype` | taken directly from the Polars column |
 | `nullable` | `True` if the column contains any null |
-| `gt` / `lt` bounds | observed min/max with a small margin (skipped for 64-bit ints that could lose precision as floats) |
+| `gt` / `lt` bounds | observed min/max with a small margin (skipped for 64- and 128-bit ints that could lose precision as floats) |
 | `matches` pattern | emitted when every non-null string matches a known pattern: email, URL, ISO date, UUID |
 | `one_of` | emitted when a string column has ≤ 20 distinct values covering ≤ 5% of rows |
 | `unique` | emitted when all values are distinct and non-null |

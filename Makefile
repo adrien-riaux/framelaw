@@ -1,4 +1,4 @@
-.PHONY: help format lint build build-release test examples wheel publish clean
+.PHONY: help format lint build build-release test scripts wheel publish clean
 
 help:
 	@echo "Available commands:"
@@ -7,7 +7,7 @@ help:
 	@echo "  make build         - Build the extension, editable debug install"
 	@echo "  make build-release - Rebuild the extension optimized (--release)"
 	@echo "  make test          - Rust + Python test suites"
-	@echo "  make examples      - Run every example script"
+	@echo "  make scripts       - Run every smoke-test / benchmark script"
 	@echo "  make wheel         - Release wheel + sdist into ./dist"
 	@echo "  make publish       - Upload ./dist to TestPyPI (PYPI_URL=... to override)"
 	@echo "  make clean         - Clean the build artifacts"
@@ -16,20 +16,20 @@ format:
 	@echo "=> Formatting Rust code..."
 	cargo fmt
 	@echo "=> Formatting Python code..."
-	uvx ruff format framelaw-py examples
+	uvx ruff format framelaw-py scripts
 
 lint:
 	@echo "=> Linting Rust code with Clippy..."
 	cargo clippy --all-targets -- -D warnings
 	@echo "=> Linting Python code..."
-	uvx ruff check framelaw-py examples
-	uvx ruff format --check framelaw-py examples
+	uvx ruff check framelaw-py scripts
+	uvx ruff format --check framelaw-py scripts
 	@echo "=> Type-checking Python code with ty..."
 	test -d .venv || uv venv
 	uv pip install -q ty polars pydantic
-	uv run ty check --extra-search-path framelaw-py/python framelaw-py/python examples
+	uv run ty check --extra-search-path framelaw-py/python framelaw-py/python scripts
 	@echo "=> Checking docstring coverage with interrogate..."
-	uvx interrogate framelaw-py/python examples
+	uvx interrogate framelaw-py/python scripts
 
 build:
 	@echo "=> Building Python extension (debug, with dev extras)..."
@@ -53,10 +53,10 @@ test:
 	@echo "=> Running Python tests..."
 	uv run --with pytest --with-editable ./framelaw-py pytest framelaw-py/tests -q
 
-examples:
-	@echo "=> Running all examples..."
-	for example in examples/*.py; do \
-		uv run --with-editable ./framelaw-py python "$$example"; \
+scripts:
+	@echo "=> Running all scripts..."
+	for script in scripts/*.py; do \
+		uv run --with-editable ./framelaw-py python "$$script"; \
 	done
 
 clean:

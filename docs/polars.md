@@ -1,7 +1,7 @@
 # Polars integration
 
 FrameLaw is Polars-native: validation runs on Polars' columnar memory with no
-conversion step, and every native dtype can appear in a schema.
+conversion step, and every supported native dtype can appear in a schema.
 
 ## DataFrames and LazyFrames
 
@@ -17,11 +17,11 @@ schema.validate(pl.scan_csv("users.csv"))  # LazyFrame works too
 
 | Polars dtype | Support |
 |---|---|
-| `Int8/16/32/64`, `UInt8/16/32/64` | full numeric checks |
-| `Float32`, `Float64` | full numeric checks |
+| `Int8/16/32/64`, `UInt8/16/32/64`, `Int128`, `UInt128` | full numeric checks (exact, no `f64` rounding) |
+| `Float16`, `Float32`, `Float64` | full numeric checks |
 | `String` | regex, `one_of`, uniqueness |
 | `Boolean` | nullability, uniqueness |
-| `Date`, `Datetime`, `Duration`, `Time` | temporal bounds via `gt`/`lt` |
+| `Date`, `Datetime`, `Duration`, `Time` | temporal bounds via `gt`/`gte`/`lt`/`lte`/`between` |
 | `List`, `Array`, `Struct` | nested validation (one level) |
 | `Null` | treated as always-nullable |
 | other scalar dtypes | dtype + nullability enforcement |

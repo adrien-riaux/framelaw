@@ -26,8 +26,13 @@ assert schema.validate(frame) is None
   UUID, 5-digit zip, 2-letter code). A pattern with no known canned value,
   or a set of patterns no single canned value satisfies, raises a
   cannot-synthesize error instead of emitting potentially invalid data.
-- `unique` / `unique_together`: repaired by resampling.
-- `nullable=True`: ~5% nulls injected (never for unique columns).
+- `unique`: resolved directly on small known domains (`one_of` pools are
+  shuffle-taken, pattern-locked strings expanded by mutation); otherwise
+  distinct values are harvested across batches. Impossible demands (e.g.
+  `bool` with more than two rows) error instead of looping.
+- `unique_together`: repaired by resampling.
+- `nullable=True`: ~5% nulls injected (skipped when the column already holds
+  distinct values, or when an explicit `not_null()` check forbids nulls).
 - Lists/arrays: lengths within the inferred or declared bounds; structs built
   field-by-field honoring `struct_field` checks.
 - Cross-column comparisons: satisfied by joint rejection sampling
