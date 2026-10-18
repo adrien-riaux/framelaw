@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-polars = { version = "0.55.2", default-features = false, features = ["lazy", "strings", "regex", "temporal", "dtype-struct", "dtype-array", "dtype-i128", "dtype-u128"] }
+polars = { version = "0.55.2", default-features = false, features = ["lazy", "strings", "regex", "temporal", "dtype-struct", "dtype-array", "dtype-i128", "dtype-u128", "dtype-f16"] }
 rand = "0.9"
 rand_chacha = "0.9"
 rayon = "1.10.0"
