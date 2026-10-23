@@ -1,6 +1,6 @@
 [project]
 name = "framelaw"
-version = "0.1.1-rc2"
+version = "0.1.1"
 requires-python = ">=3.10"
 description = "Native Rust schema contracts, built for Polars"
 classifiers = [
