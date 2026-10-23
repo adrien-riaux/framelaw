@@ -1,7 +1,18 @@
 # Changelog
 
-All notable changes to framelaw are documented here. The format follows
+All notable changes to Framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Packaging
+
+- Prebuilt wheels are now published for macOS (arm64 and x86_64), Linux
+  (x86_64 and aarch64), and Windows (x86_64). Installing with `pip`/`uv` no
+  longer compiles Polars from source on those platforms.
+- The extension targets the CPython limited API (`abi3-py310`): a single
+  wheel per platform supports CPython 3.10 and newer, replacing the
+  per-interpreter wheels.
 
 ## [0.1.0] — First release
 

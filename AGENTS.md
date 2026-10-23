@@ -1,7 +1,7 @@
-# framelaw Context & Instructions
+# Framelaw Context & Instructions
 
 **Project Context**
-framelaw is a Polars-native DataFrame validation library built in Rust and exposed to Python. It validates data in parallel against schemas, integrating smoothly with Pydantic V2. Current package version is `0.1.0` (see `framelaw-py/pyproject.toml` and both `Cargo.toml` files — keep them in sync).
+Framelaw is a Polars-native DataFrame validation library built in Rust and exposed to Python. It validates data in parallel against schemas, integrating smoothly with Pydantic V2. Current package version is `0.1.0` (see `framelaw-py/pyproject.toml` and both `Cargo.toml` files — keep them in sync).
 
 **Core Architecture**
 The repository is structured as a Cargo workspace with a strict separation of concerns:
