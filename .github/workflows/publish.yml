@@ -4,6 +4,9 @@ on:
   push:
     tags: ["v*"]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   gate:
     name: Pre-publish gate
@@ -35,46 +38,139 @@ jobs:
       - name: Docstring coverage
         run: uvx interrogate framelaw-py/python scripts
 
-  build:
-    name: Build wheels and sdist
+  build-linux:
+    name: Linux ${{ matrix.arch }}
+    needs: [gate]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          manylinux: auto
+          args: --release --locked --out dist --manifest-path framelaw-py/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-${{ matrix.arch }}
+          path: dist/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Smoke-test wheel
+        shell: bash
+        run: |
+          python -m pip install --quiet polars pydantic
+          python -m pip install --quiet --no-deps --force-reinstall dist/*.whl
+          python -c "import framelaw; print('framelaw', framelaw.__version__)"
+
+  build-macos:
+    name: macOS ${{ matrix.target }}
+    needs: [gate]
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: --release --locked --out dist --manifest-path framelaw-py/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos-${{ matrix.target }}
+          path: dist/
+      # Only the arm64 wheel is runnable on the arm64 runner.
+      - uses: actions/setup-python@v5
+        if: matrix.target == 'aarch64-apple-darwin'
+        with:
+          python-version: "3.12"
+      - name: Smoke-test wheel
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          python -m pip install --quiet polars pydantic
+          python -m pip install --quiet --no-deps --force-reinstall dist/*.whl
+          python -c "import framelaw; print('framelaw', framelaw.__version__)"
+
+  build-windows:
+    name: Windows x86_64
+    needs: [gate]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: x86_64-pc-windows-msvc
+          args: --release --locked --out dist --manifest-path framelaw-py/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-x86_64
+          path: dist/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Smoke-test wheel
+        shell: bash
+        run: |
+          python -m pip install --quiet polars pydantic
+          python -m pip install --quiet --no-deps --force-reinstall dist/*.whl
+          python -c "import framelaw; print('framelaw', framelaw.__version__)"
+
+  build-sdist:
+    name: sdist
     needs: [gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: PyO3/maturin-action@v1
         with:
-          command: build
-          args: --release --out dist --manifest-path framelaw-py/Cargo.toml --find-interpreter
-          manylinux: auto
-      - uses: PyO3/maturin-action@v1
-        with:
           command: sdist
           args: --out dist --manifest-path framelaw-py/Cargo.toml
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-sdist
           path: dist/
 
   publish-testpypi:
     name: Publish to TestPyPI
     if: contains(github.ref_name, '-rc.')
-    needs: [build]
+    needs: [build-linux, build-macos, build-windows, build-sdist]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
 
   publish-pypi:
     name: Publish to PyPI
     if: ${{ !contains(github.ref_name, '-rc.') }}
-    needs: [build]
+    needs: [build-linux, build-macos, build-windows, build-sdist]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -85,9 +181,12 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
       - name: Attach assets to GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
