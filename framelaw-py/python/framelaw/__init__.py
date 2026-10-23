@@ -4,6 +4,8 @@ This module provides the main entrypoint for defining schemas
 and validating Polars DataFrames using high-performance Rust logic.
 """
 
+from importlib.metadata import PackageNotFoundError, version
+
 from ._framelaw import (
     Check,
     Column,
@@ -37,7 +39,13 @@ from ._framelaw import (
     unique_values,
 )
 
+try:
+    __version__ = version("framelaw")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
+
 __all__ = [
+    "__version__",
     "Check",
     "Column",
     "DataFrameCheck",

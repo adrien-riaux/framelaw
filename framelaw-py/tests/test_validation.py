@@ -1,10 +1,16 @@
 from datetime import date, datetime
+from importlib import metadata
 from typing import Literal
 
 import framelaw as fl
 import polars as pl
 import pytest
 from pydantic import BaseModel, Field
+
+
+def test_package_exposes_installed_version() -> None:
+    """Expose the distribution version as ``framelaw.__version__``."""
+    assert fl.__version__ == metadata.version("framelaw")
 
 
 def test_validation_returns_report_with_rows() -> None:
