@@ -5,6 +5,10 @@ All notable changes to Framelaw are documented here. The format follows
 
 ## [Unreleased]
 
+### Python API
+
+- `framelaw.__version__` exposes the installed distribution version.
+
 ### Packaging
 
 - Prebuilt wheels are now published for macOS (arm64 and x86_64), Linux

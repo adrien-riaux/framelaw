@@ -3,6 +3,13 @@
 Complete reference for the `framelaw` package. Everything below is importable
 from the top level (`import framelaw as fl`).
 
+## Module
+
+### `framelaw.__version__`
+
+`str` — the installed distribution version in PEP 440 form (for example
+`"0.1.0"` or `"0.1.1rc1"`), read from the package metadata.
+
 ## Classes
 
 ### `Schema`
