@@ -63,6 +63,30 @@ fn infer_series_schema(series: &Series) -> ColumnSpec {
             }
         }
 
+        // Ticks respect each dtype's natural unit: whole days for `Date`,
+        // nanosecond/microsecond/second counts for `Datetime`/`Duration`,
+        // nanoseconds for `Time`.
+        let temporal_bounds = matches!(
+            dtype,
+            DataType::Date | DataType::Datetime(_, _) | DataType::Duration(_) | DataType::Time
+        );
+        if temporal_bounds {
+            if let Ok(tick_series) = series.cast(&DataType::Int64) {
+                if let Ok(tick_ca) = tick_series.i64() {
+                    if let Some(min_tick) = tick_ca.min() {
+                        checks.push(Box::new(GreaterThanF64 {
+                            min_value: min_tick as f64 - 1.0,
+                        }));
+                    }
+                    if let Some(max_tick) = tick_ca.max() {
+                        checks.push(Box::new(LessThanF64 {
+                            max_value: max_tick as f64 + 1.0,
+                        }));
+                    }
+                }
+            }
+        }
+
         // 4. Nested List/Array lengths: observed min/max as starting bounds.
         if matches!(dtype, DataType::List(_) | DataType::Array(_, _)) {
             if let Some((min_len, max_len)) = nested_len_bounds(series) {
@@ -283,5 +307,45 @@ mod tests {
         assert!(inferred_specs(&infer_schema(&empty), "empty")
             .iter()
             .any(|spec| matches!(spec, CheckSpec::NotNull)));
+    }
+
+    #[test]
+    fn infers_temporal_tick_bounds() {
+        let dates = Series::new("d".into(), [0i32, 50, 100])
+            .cast(&DataType::Date)
+            .unwrap();
+        let df = DataFrame::new(3, vec![dates.into()]).unwrap();
+
+        let specs = inferred_specs(&infer_schema(&df), "d");
+        assert!(specs
+            .iter()
+            .any(|spec| matches!(spec, CheckSpec::GreaterThan(v) if *v == -1.0)));
+        assert!(specs
+            .iter()
+            .any(|spec| matches!(spec, CheckSpec::LessThan(v) if *v == 101.0)));
+        // The inferred schema must accept the observed data.
+        assert!(infer_schema(&df).validate(&df).is_valid());
+    }
+
+    #[test]
+    fn samples_within_inferred_temporal_bounds() {
+        let dates = Series::new("d".into(), [0i32, 50, 100])
+            .cast(&DataType::Date)
+            .unwrap();
+        let df = DataFrame::new(3, vec![dates.into()]).unwrap();
+        let schema = infer_schema(&df);
+
+        let frame = crate::generate::sample(&schema, 50, 7).unwrap();
+        let in_bounds = frame
+            .column("d")
+            .unwrap()
+            .cast(&DataType::Int64)
+            .unwrap()
+            .i64()
+            .unwrap()
+            .iter()
+            .flatten()
+            .all(|tick| (0..=100).contains(&tick));
+        assert!(in_bounds);
     }
 }

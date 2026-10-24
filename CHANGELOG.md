@@ -16,6 +16,10 @@ All notable changes to Framelaw are documented here. The format follows
   boolean membership in addition to strings; integer rows are compared
   exactly beyond the 2^53 float range.
 
+- `infer_schema` now emits observed min/max bounds for temporal columns in
+  their tick unit (days for `Date`, the unit ticks for `Datetime`/
+  `Duration`, nanoseconds for `Time`), and `sample` stays inside them.
+
 ### Table checks
 
 - Five new cross-column checks validate whole rows across columns:

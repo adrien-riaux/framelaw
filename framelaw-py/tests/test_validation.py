@@ -211,6 +211,32 @@ def test_infer_schema_and_refine_column() -> None:
     )
 
 
+def test_infer_schema_temporal_bounds_and_sample() -> None:
+    """Temporal columns infer tick bounds, and sample stays inside them."""
+    from datetime import timedelta
+
+    epoch = date(1970, 1, 1)
+    dataframe = pl.DataFrame(
+        {"start": [epoch, epoch + timedelta(days=50)], "end": [epoch + timedelta(days=1), epoch + timedelta(days=60)]},
+        schema={"start": pl.Date, "end": pl.Date},
+    )
+
+    schema = fl.infer_schema(dataframe)
+    assert schema.validate(dataframe) is None
+
+    generated = fl.sample(schema, 40, seed=3).cast({"start": pl.Date, "end": pl.Date})
+    assert schema.validate(generated) is None
+
+    ticks = generated.select(
+        (pl.col("start") - pl.lit(epoch)).dt.total_days().alias("start_tick"),
+        (pl.col("end") - pl.lit(epoch)).dt.total_days().alias("end_tick"),
+    )
+    assert ticks["start_tick"].min() >= -1
+    assert ticks["start_tick"].max() <= 50
+    assert ticks["end_tick"].min() >= 0
+    assert ticks["end_tick"].max() <= 61
+
+
 def test_lazyframe_and_polars_schema_validation() -> None:
     """Collect LazyFrames once and build schemas from native Polars dtypes."""
     schema = fl.Schema.from_polars_schema({"value": pl.Int64})
