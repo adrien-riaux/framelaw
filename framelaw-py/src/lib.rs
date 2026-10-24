@@ -1,14 +1,14 @@
 use polars::prelude::{DataFrame, NamedFrom, Series};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyType};
+use pyo3::types::{PyAny, PyDict, PyList, PyType};
 use pyo3_polars::{PyDataFrame, PyDataType};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use framelaw_core::checks::{
-    BetweenF64, Check, CheckSpec, GreaterThanF64, GreaterThanOrEqualF64, LessThanF64,
-    LessThanOrEqualF64, ListLenBetween, ListNotEmpty, MatchesRegex, NotNull, OneOfString,
-    StructFieldCheck, UniqueValues,
+    BetweenF64, Check, CheckSpec, EndsWith, GreaterThanF64, GreaterThanOrEqualF64, LessThanF64,
+    LessThanOrEqualF64, ListLenBetween, ListNotEmpty, MatchesRegex, NotBlank, NotNull,
+    OneOfNumericValues, OneOfString, StartsWith, StrLengthBetween, StructFieldCheck, UniqueValues,
 };
 use framelaw_core::column::ColumnSpec;
 use framelaw_core::dataframe_checks::{
@@ -28,6 +28,11 @@ enum CheckType {
     BetweenF64(f64, f64),
     MatchesRegex(String),
     OneOfString(Vec<String>),
+    OneOfNumeric(Vec<f64>),
+    StrLengthBetween(usize, usize),
+    NotBlank,
+    StartsWith(String),
+    EndsWith(String),
     ListLenBetween(usize, usize),
     ListNotEmpty,
     StructField(String, Vec<PyCheck>),
@@ -51,6 +56,11 @@ impl PyCheck {
             CheckSpec::Between(min, max) => CheckType::BetweenF64(min, max),
             CheckSpec::Matches(pattern) => CheckType::MatchesRegex(pattern),
             CheckSpec::OneOf(values) => CheckType::OneOfString(values),
+            CheckSpec::OneOfNumeric(values) => CheckType::OneOfNumeric(values),
+            CheckSpec::StrLengthBetween(min, max) => CheckType::StrLengthBetween(min, max),
+            CheckSpec::NotBlank => CheckType::NotBlank,
+            CheckSpec::StartsWith(prefix) => CheckType::StartsWith(prefix),
+            CheckSpec::EndsWith(suffix) => CheckType::EndsWith(suffix),
             CheckSpec::ListLenBetween(lo, hi) => CheckType::ListLenBetween(lo, hi),
             CheckSpec::ListNotEmpty => CheckType::ListNotEmpty,
             CheckSpec::StructField(field, inner) => {
@@ -82,6 +92,14 @@ impl PyCheck {
             CheckType::OneOfString(v) => Box::new(OneOfString {
                 allowed_values: v.into_iter().collect(),
             }),
+            CheckType::OneOfNumeric(v) => Box::new(OneOfNumericValues { allowed_values: v }),
+            CheckType::StrLengthBetween(min, max) => Box::new(StrLengthBetween {
+                min_len: min,
+                max_len: max,
+            }),
+            CheckType::NotBlank => Box::new(NotBlank),
+            CheckType::StartsWith(prefix) => Box::new(StartsWith { prefix }),
+            CheckType::EndsWith(suffix) => Box::new(EndsWith { suffix }),
             CheckType::ListLenBetween(lo, hi) => Box::new(ListLenBetween {
                 min_len: lo,
                 max_len: hi,
@@ -162,9 +180,69 @@ pub fn matches_regex(pattern: String) -> PyResult<PyCheck> {
 }
 
 #[pyfunction]
-pub fn is_in(allowed: Vec<String>) -> PyResult<PyCheck> {
+pub fn is_in_strings(allowed: Vec<String>) -> PyResult<PyCheck> {
     Ok(PyCheck {
         inner: CheckType::OneOfString(allowed),
+    })
+}
+
+/// Classifies an allowed-value list into a string or a numeric membership
+/// check. All elements must share one class: strings, or numbers/booleans.
+/// Numeric membership compares at `f64` granularity against `f64` rows and
+/// exactly against integer rows through the widened committed sets.
+#[pyfunction]
+pub fn is_in(allowed: &Bound<'_, PyList>) -> PyResult<PyCheck> {
+    if allowed.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "allowed list must not be empty",
+        ));
+    }
+    let mut strings: Vec<String> = Vec::with_capacity(allowed.len());
+    let mut numeric: Vec<f64> = Vec::with_capacity(allowed.len());
+    let mut saw_string = false;
+    let mut saw_number = false;
+    for item in allowed.iter() {
+        if item.is_instance_of::<pyo3::types::PyBool>() {
+            saw_number = true;
+            let truthy: bool = item.extract()?;
+            numeric.push(if truthy { 1.0 } else { 0.0 });
+        } else if item.is_instance_of::<pyo3::types::PyString>() {
+            saw_string = true;
+            strings.push(item.extract()?);
+        } else if item.is_instance_of::<pyo3::types::PyInt>() {
+            saw_number = true;
+            // Any i128 converts to a finite f64 (i128 tops out around
+            // 1.7e38, far below f64's range); values beyond the 2^53
+            // mantissa round, which the exact integer comparison in the
+            // core will honor per-row.
+            let value: i128 = item.extract()?;
+            numeric.push(value as f64);
+        } else if item.is_instance_of::<pyo3::types::PyFloat>() {
+            saw_number = true;
+            let value: f64 = item.extract()?;
+            if !value.is_finite() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "numeric allowed values must be finite",
+                ));
+            }
+            numeric.push(value);
+        } else {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "is_in supports lists of strings, numbers, or booleans",
+            ));
+        }
+        if saw_string && saw_number {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "allowed list must contain only strings or only numbers/booleans",
+            ));
+        }
+    }
+    Ok(PyCheck {
+        inner: if saw_string {
+            CheckType::OneOfString(strings)
+        } else {
+            CheckType::OneOfNumeric(numeric)
+        },
     })
 }
 
@@ -174,13 +252,46 @@ fn matches_check(pattern: String) -> PyResult<PyCheck> {
 }
 
 #[pyfunction(name = "one_of")]
-fn one_of(allowed: Vec<String>) -> PyResult<PyCheck> {
+fn one_of(allowed: &Bound<'_, PyList>) -> PyResult<PyCheck> {
     is_in(allowed)
 }
 
 #[pyfunction(name = "unique")]
 fn unique() -> PyResult<PyCheck> {
     unique_values()
+}
+
+#[pyfunction]
+fn str_length_between(min_len: usize, max_len: usize) -> PyResult<PyCheck> {
+    if min_len > max_len {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "min_len must be <= max_len",
+        ));
+    }
+    Ok(PyCheck {
+        inner: CheckType::StrLengthBetween(min_len, max_len),
+    })
+}
+
+#[pyfunction]
+fn not_blank() -> PyResult<PyCheck> {
+    Ok(PyCheck {
+        inner: CheckType::NotBlank,
+    })
+}
+
+#[pyfunction]
+fn starts_with(prefix: String) -> PyResult<PyCheck> {
+    Ok(PyCheck {
+        inner: CheckType::StartsWith(prefix),
+    })
+}
+
+#[pyfunction]
+fn ends_with(suffix: String) -> PyResult<PyCheck> {
+    Ok(PyCheck {
+        inner: CheckType::EndsWith(suffix),
+    })
 }
 
 #[pyfunction]
@@ -380,6 +491,20 @@ enum JsonCheck {
     },
     OneOf {
         values: Vec<String>,
+    },
+    OneOfNumeric {
+        values: Vec<f64>,
+    },
+    StrLengthBetween {
+        min: usize,
+        max: usize,
+    },
+    NotBlank,
+    StartsWith {
+        prefix: String,
+    },
+    EndsWith {
+        suffix: String,
     },
     ListLenBetween {
         min_len: usize,
@@ -658,7 +783,7 @@ impl PySchema {
                         .extract::<Vec<String>>()?;
                     (
                         PyDataType(polars::prelude::DataType::String),
-                        vec![is_in(expected)?],
+                        vec![is_in_strings(expected)?],
                     )
                 }
                 other => {
@@ -1043,6 +1168,22 @@ impl PySchema {
                 values.sort_unstable();
                 JsonCheck::OneOf { values }
             }
+            CheckType::OneOfNumeric(values) => {
+                let mut values = values.clone();
+                values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+                JsonCheck::OneOfNumeric { values }
+            }
+            CheckType::StrLengthBetween(min, max) => JsonCheck::StrLengthBetween {
+                min: *min,
+                max: *max,
+            },
+            CheckType::NotBlank => JsonCheck::NotBlank,
+            CheckType::StartsWith(prefix) => JsonCheck::StartsWith {
+                prefix: prefix.clone(),
+            },
+            CheckType::EndsWith(suffix) => JsonCheck::EndsWith {
+                suffix: suffix.clone(),
+            },
             CheckType::ListLenBetween(min_len, max_len) => JsonCheck::ListLenBetween {
                 min_len: *min_len,
                 max_len: *max_len,
@@ -1065,7 +1206,14 @@ impl PySchema {
             JsonCheck::LessThanOrEqual { value } => lte(value),
             JsonCheck::Between { min, max } => between(min, max),
             JsonCheck::Matches { pattern } => matches_regex(pattern),
-            JsonCheck::OneOf { values } => is_in(values),
+            JsonCheck::OneOf { values } => is_in_strings(values),
+            JsonCheck::OneOfNumeric { values } => Ok(PyCheck {
+                inner: CheckType::OneOfNumeric(values),
+            }),
+            JsonCheck::StrLengthBetween { min, max } => str_length_between(min, max),
+            JsonCheck::NotBlank => not_blank(),
+            JsonCheck::StartsWith { prefix } => starts_with(prefix),
+            JsonCheck::EndsWith { suffix } => ends_with(suffix),
             JsonCheck::ListLenBetween { min_len, max_len } => list_len_between(min_len, max_len),
             JsonCheck::ListNotEmpty => list_not_empty(),
             JsonCheck::StructField { field, checks } => {
@@ -1495,6 +1643,10 @@ fn _framelaw(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(matches_check, m)?)?;
     m.add_function(wrap_pyfunction!(one_of, m)?)?;
     m.add_function(wrap_pyfunction!(unique, m)?)?;
+    m.add_function(wrap_pyfunction!(str_length_between, m)?)?;
+    m.add_function(wrap_pyfunction!(not_blank, m)?)?;
+    m.add_function(wrap_pyfunction!(starts_with, m)?)?;
+    m.add_function(wrap_pyfunction!(ends_with, m)?)?;
     m.add_function(wrap_pyfunction!(list_len_between, m)?)?;
     m.add_function(wrap_pyfunction!(list_not_empty, m)?)?;
     m.add_function(wrap_pyfunction!(struct_field, m)?)?;

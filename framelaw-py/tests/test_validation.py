@@ -54,6 +54,122 @@ def test_invalid_regex_is_a_python_error() -> None:
         fl.matches("[")
 
 
+def test_string_checks_report_expected_rows() -> None:
+    """Combine string membership with the new string checks."""
+    schema = fl.Schema(
+        {
+            "code": fl.Column(
+                pl.String,
+                checks=[
+                    fl.str_length_between(2, 5),
+                    fl.not_blank(),
+                    fl.starts_with("AB"),
+                    fl.ends_with("-1"),
+                    fl.is_in(["AB-1", "AB2-1"]),
+                ],
+            ),
+        }
+    )
+    valid = pl.DataFrame({"code": ["AB-1", "AB2-1"]})
+    assert schema.validate(valid) is None
+
+    bad = pl.DataFrame({"code": ["ABCD-1", "", "cb-1", "AB-2", "AB-1x"]})
+    report = schema.validate(bad, raise_on_error=False)
+    assert not report.is_valid()
+    rows_by_check = {e.check: e.rows for e in report.errors}
+    assert rows_by_check["StrLengthBetween"] == [0, 1]
+    assert rows_by_check["NotBlank"] == [1]
+    assert rows_by_check["StartsWith"] == [1, 2]
+    assert rows_by_check["EndsWith"] == [1, 3, 4]
+    assert rows_by_check["OneOfString"] == [0, 1, 2, 3, 4]
+
+
+def test_numeric_and_boolean_one_of_membership() -> None:
+    """Generalize one_of membership to numbers and booleans."""
+    schema = fl.Schema(
+        {
+            "level": fl.Column(pl.Int64, checks=[fl.is_in([2, 4, 6])]),
+            "score": fl.Column(pl.Float64, checks=[fl.is_in([0.5, 1.5])]),
+            "flag": fl.Column(pl.Boolean, checks=[fl.is_in([True])]),
+        }
+    )
+    valid = pl.DataFrame({"level": [2, 4, 6], "score": [1.5, 0.5, 1.5], "flag": [True, True, True]})
+    assert schema.validate(valid) is None
+
+    bad = pl.DataFrame({"level": [3], "score": [1.0], "flag": [False]})
+    report = schema.validate(bad, raise_on_error=False)
+    assert all(e.check == "OneOfNumeric" for e in report.errors)
+    assert len(report.errors) == 3
+    assert next(e for e in report.errors if e.column == "level").rows == [0]
+    assert next(e for e in report.errors if e.column == "score").rows == [0]
+    assert next(e for e in report.errors if e.column == "flag").rows == [0]
+
+
+def test_one_of_rejects_empty_and_mixed_lists() -> None:
+    """Guard the generalized is_in constructor against bad inputs."""
+    with pytest.raises(ValueError, match="empty"):
+        fl.is_in([])
+    with pytest.raises(ValueError, match="only strings or only numbers"):
+        fl.is_in(["a", 1])
+    with pytest.raises(ValueError, match="strings, numbers, or booleans"):
+        fl.is_in([object()])
+    with pytest.raises(ValueError, match="min_len must be <= max_len"):
+        fl.str_length_between(5, 2)
+
+
+def test_new_string_checks_json_round_trip() -> None:
+    """Round-trip the new checks through schema JSON."""
+    schema = fl.Schema(
+        {
+            "code": fl.Column(
+                pl.String,
+                checks=[fl.str_length_between(2, 4), fl.not_blank()],
+            ),
+            "file": fl.Column(pl.String, checks=[fl.starts_with("data."), fl.ends_with(".csv")]),
+            "level": fl.Column(pl.Int64, checks=[fl.is_in([1, 3])]),
+        }
+    )
+    payload = schema.to_json()
+    loaded = fl.Schema.from_json(payload)
+    frame = pl.DataFrame(
+        {"code": ["ab", "abc"], "file": ["data.a.csv", "data.b.csv"], "level": [1, 3]}
+    )
+    assert loaded.validate(frame) is None
+    bad = pl.DataFrame({"code": ["a", " "], "file": ["other.txt", "data.b.csv"], "level": [2, 4]})
+    report = loaded.validate(bad, raise_on_error=False)
+    assert not report.is_valid()
+    assert next(
+        e for e in report.errors if e.column == "code" and e.check == "StrLengthBetween"
+    ).rows == [0, 1]
+    assert next(e for e in report.errors if e.column == "code" and e.check == "NotBlank").rows == [
+        1
+    ]
+    assert next(
+        e for e in report.errors if e.column == "file" and e.check == "StartsWith"
+    ).rows == [0]
+    assert next(e for e in report.errors if e.column == "file" and e.check == "EndsWith").rows == [
+        0
+    ]
+    assert next(
+        e for e in report.errors if e.column == "level" and e.check == "OneOfNumeric"
+    ).rows == [0, 1]
+
+
+def test_new_string_checks_generation() -> None:
+    """Sample valid data when schema uses the new string checks."""
+    schema = fl.Schema(
+        {
+            "code": fl.Column(
+                pl.String,
+                checks=[fl.str_length_between(3, 8), fl.starts_with("x-"), fl.not_blank()],
+            ),
+            "level": fl.Column(pl.Int64, checks=[fl.is_in([1, 2])]),
+        }
+    )
+    frame = fl.sample(schema, n=10, seed=7)
+    assert schema.validate(frame) is None
+
+
 def test_dtype_mismatch_is_reported() -> None:
     """Reject a DataFrame column whose native dtype differs from the schema."""
     schema = fl.Schema({"value": fl.Column(pl.Int32)})

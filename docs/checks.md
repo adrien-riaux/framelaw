@@ -52,13 +52,41 @@ fl.Column(pl.Date, checks=[fl.gt(0)])  # dates after the epoch
 |---|---|
 | `fl.matches(pattern)` (`fl.matches_regex(pattern)`) | a non-null string does not match the regex |
 | `fl.one_of(values)` (`fl.is_in(values)`) | a non-null string is not in the allowed set |
+| `fl.str_length_between(min_len, max_len)` | a non-null string length is outside `[min_len, max_len]` characters |
+| `fl.not_blank()` | a non-null string is empty or whitespace-only |
+| `fl.starts_with(prefix)` | a non-null string does not start with the prefix |
+| `fl.ends_with(suffix)` | a non-null string does not end with the suffix |
 
-Nulls are skipped by both — nullability is governed by `nullable` / `not_null`
-only. An invalid regex raises `ValueError` immediately at construction time.
+Nulls are skipped by all string checks — nullability is governed by
+`nullable` / `not_null` only. An invalid regex raises `ValueError`
+immediately at construction time. Length is counted in characters, not
+bytes.
 
 ```python
 fl.Column(pl.String, checks=[fl.matches(r"^[A-Z]{2}$"), fl.one_of(["FR", "US"])])
+fl.Column(pl.String, checks=[fl.not_blank(), fl.str_length_between(1, 64)])
+fl.Column(pl.String, checks=[fl.starts_with("prj_"), fl.ends_with("-v1")])
 ```
+
+## Membership checks
+
+`fl.one_of(values)` / `fl.is_in(values)` accepts a list of strings, numbers,
+or booleans. All elements must share one class — a mixed list raises
+`ValueError`:
+
+```python
+fl.Column(pl.String, checks=[fl.one_of(["FR", "US"])])
+fl.Column(pl.Int64, checks=[fl.is_in([1, 2, 3])])
+fl.Column(pl.Float64, checks=[fl.is_in([0.0, 0.5, 1.0])])
+fl.Column(pl.Boolean, checks=[fl.is_in([True])])
+```
+
+Numeric membership compares at `f64` granularity against float columns and
+exactly against integer columns (values are widened to `i128`/`u128`
+before comparison, so integers beyond the 2^53 float range are never
+merged by rounding). Boolean columns are compared as `true`/`false`
+through the same integer machinery, so `is_in([True])` only accepts
+`True` values.
 
 ## Nested checks
 

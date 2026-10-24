@@ -5,6 +5,23 @@ All notable changes to Framelaw are documented here. The format follows
 
 ## [Unreleased]
 
+### Python API
+
+- `framelaw.str_length_between(min_len, max_len)` bounds non-null string
+  values by character length.
+- `framelaw.not_blank()` rejects empty and whitespace-only strings.
+- `framelaw.starts_with(prefix)` / `framelaw.ends_with(suffix)` pin string
+  affixes.
+- `framelaw.one_of(values)` / `framelaw.is_in(values)` now accept numeric and
+  boolean membership in addition to strings; integer rows are compared
+  exactly beyond the 2^53 float range.
+
+### Data generation
+
+- `sample` honors all new checks, including string constraints and numeric
+  membership, and reports unsatisfiable combinations (e.g. a fractional
+  `one_of` on an integer column, a temporal `one_of`) as errors.
+
 ## [0.1.1]
 
 ### Python API
