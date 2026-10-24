@@ -7,10 +7,13 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use regex::Regex;
 
-use crate::checks::{exact_i128_value, exact_u128_value, is_supported_numeric_dtype, CheckSpec};
+use crate::checks::{
+    exact_i128_value, exact_u128_value, int_domain, is_supported_numeric_dtype, CheckSpec,
+    IntDomain,
+};
 use crate::column::ColumnSpec;
 use crate::dataframe_checks::{
-    cmp_mixed_int_uint, int128_cells, is_temporal_dtype, uint128_cells, CompareOp,
+    cmp_mixed_int_uint, int128_cells, is_temporal_dtype, ns_per_tick, uint128_cells, CompareOp,
     DataFrameCheckSpec,
 };
 use crate::schema::Schema;
@@ -1541,6 +1544,535 @@ fn enforce_unique_together(
     ))
 }
 
+/// Enforces a per-row chain order by reusing the pair enforcement: the
+/// chain is exactly `c1 (<=|<) c2 (<=|<) c3 ...`. Pairs are repaired
+/// jointly, and the fixed-point loop re-runs passes until the frame
+/// validates as a whole.
+fn enforce_ordered(
+    frame: &mut HashMap<String, Series>,
+    lookup: &HashMap<&str, &ColumnSpec>,
+    rng: &mut ChaCha8Rng,
+    columns: &[String],
+    strict: bool,
+) -> PolarsResult<()> {
+    let op = if strict { CompareOp::Lt } else { CompareOp::Le };
+    if columns.len() < 2 {
+        return Err(PolarsError::ComputeError(
+            "Ordered needs at least two columns".into(),
+        ));
+    }
+    for pair in columns.windows(2) {
+        enforce_comparison(frame, lookup, rng, &pair[0], op, &pair[1])?;
+    }
+    Ok(())
+}
+
+/// A summed cell in the widest applicable domain. Mirrors the validation
+/// classification: exact `i128`/`u128` when every column shares one
+/// integer domain, `f64` when any float or mixed-domain column joins.
+#[derive(Clone, Copy)]
+enum SumCell {
+    Int(Option<i128>),
+    UInt(Option<u128>),
+    Float(Option<f64>),
+}
+
+impl SumCell {
+    fn is_null(&self) -> bool {
+        matches!(self, Self::Int(None) | Self::UInt(None) | Self::Float(None))
+    }
+}
+
+fn extract_sum_cells(series: &Series) -> PolarsResult<Vec<SumCell>> {
+    if int_domain(series.dtype()) == Some(IntDomain::I128) {
+        Ok(int128_cells(series)?
+            .into_iter()
+            .map(SumCell::Int)
+            .collect())
+    } else if int_domain(series.dtype()) == Some(IntDomain::U128) {
+        Ok(uint128_cells(series)?
+            .into_iter()
+            .map(SumCell::UInt)
+            .collect())
+    } else {
+        let values = series.cast(&DataType::Float64)?;
+        let floats = values
+            .f64()
+            .map_err(|_| PolarsError::ComputeError("Cannot sum non-numeric column".into()))?;
+        Ok(floats.iter().map(SumCell::Float).collect())
+    }
+}
+
+/// One row's computed sum, or the widest fallback domain when float or
+/// mixed-domain columns participate (mirroring `sum_equals_target`).
+enum SumValue {
+    Signed(i128),
+    Unsigned(u128),
+    Float(f64),
+}
+
+/// Computed sum of one row's operands. All cells are present (nulls are
+/// skipped earlier); `None` means the exact arithmetic overflowed.
+fn row_sum(cells: &[SumCell]) -> Option<SumValue> {
+    let all_unsigned = !cells.is_empty()
+        && cells
+            .iter()
+            .all(|cell| matches!(cell, SumCell::UInt(Some(_))));
+    if all_unsigned {
+        let mut total: u128 = 0;
+        for cell in cells {
+            let SumCell::UInt(Some(value)) = cell else {
+                unreachable!("all_unsigned checked above");
+            };
+            total = total.checked_add(*value)?;
+        }
+        return Some(SumValue::Unsigned(total));
+    }
+    let any_float = cells
+        .iter()
+        .any(|cell| matches!(cell, SumCell::Float(Some(_))));
+    let mixed_int = cells
+        .iter()
+        .any(|cell| matches!(cell, SumCell::UInt(Some(_))))
+        && cells
+            .iter()
+            .any(|cell| matches!(cell, SumCell::Int(Some(_))));
+    if any_float || mixed_int {
+        let mut total = 0.0f64;
+        for cell in cells {
+            let value = match cell {
+                SumCell::Float(Some(v)) => *v,
+                SumCell::Int(Some(v)) => *v as f64,
+                SumCell::UInt(Some(v)) => *v as f64,
+                _ => return None,
+            };
+            total += value;
+        }
+        return Some(SumValue::Float(total));
+    }
+    let mut total: i128 = 0;
+    for cell in cells {
+        let SumCell::Int(Some(value)) = cell else {
+            unreachable!("all remaining cells are signed");
+        };
+        total = total.checked_add(*value)?;
+    }
+    Some(SumValue::Signed(total))
+}
+
+fn sum_matches_target(sum: &SumValue, target: &SumCell, tolerance: f64) -> bool {
+    match (sum, target) {
+        (SumValue::Signed(sum), SumCell::Int(Some(target))) => sum == target,
+        (SumValue::Unsigned(sum), SumCell::UInt(Some(target))) => sum == target,
+        (SumValue::Float(sum), SumCell::Float(Some(target))) => (sum - target).abs() <= tolerance,
+        (SumValue::Signed(sum), SumCell::UInt(Some(target))) => {
+            *target <= i128::MAX as u128 && *sum == *target as i128
+        }
+        (SumValue::Unsigned(sum), SumCell::Int(Some(target))) => {
+            *sum <= i128::MAX as u128 && *sum as i128 == *target
+        }
+        (sum, target) => {
+            let Some(target_f64) = (match target {
+                SumCell::Int(Some(v)) => Some(*v as f64),
+                SumCell::UInt(Some(v)) => Some(*v as f64),
+                SumCell::Float(Some(v)) => Some(*v),
+                _ => None,
+            }) else {
+                return false;
+            };
+            let sum_f64 = match sum {
+                SumValue::Signed(v) => *v as f64,
+                SumValue::Unsigned(v) => *v as f64,
+                SumValue::Float(v) => *v,
+            };
+            (sum_f64 - target_f64).abs() <= tolerance
+        }
+    }
+}
+
+/// The target value that makes the row's sum hold: the operand sum
+/// itself, coerced into the target's own domain. `None` marks unsynthesizable repairs (overflow, negative
+/// unsigned results); callers fall back to rejection sampling.
+#[derive(Clone, Copy, Debug)]
+enum CandidateValue {
+    Signed(i128),
+    Unsigned(u128),
+    Float(f64),
+}
+
+impl CandidateValue {
+    fn as_f64(&self) -> f64 {
+        match self {
+            Self::Signed(v) => *v as f64,
+            Self::Unsigned(v) => *v as f64,
+            Self::Float(v) => *v,
+        }
+    }
+}
+
+fn desired_target_value(sum: &SumValue, target: &SumCell) -> Option<CandidateValue> {
+    match (sum, target) {
+        (SumValue::Signed(sum), SumCell::Int(_)) => Some(CandidateValue::Signed(*sum)),
+        (SumValue::Unsigned(sum), SumCell::Int(_)) if *sum <= i128::MAX as u128 => {
+            Some(CandidateValue::Signed(*sum as i128))
+        }
+        (SumValue::Unsigned(sum), SumCell::UInt(_)) => Some(CandidateValue::Unsigned(*sum)),
+        (SumValue::Signed(sum), SumCell::UInt(_)) if *sum >= 0 => {
+            Some(CandidateValue::Unsigned(*sum as u128))
+        }
+        (SumValue::Float(sum), SumCell::Float(_)) => Some(CandidateValue::Float(*sum)),
+        // A float sum against an integer target rarely repairs exactly; offer
+        // the float and let the dtype cast (and rejection fallback) decide.
+        (SumValue::Float(sum), _) => Some(CandidateValue::Float(*sum)),
+        (SumValue::Signed(sum), _) => Some(CandidateValue::Float(*sum as f64)),
+        (SumValue::Unsigned(sum), _) => Some(CandidateValue::Float(*sum as f64)),
+    }
+}
+
+/// Whether a repaired target value also satisfies the column's own
+/// numeric bounds and numeric membership pool.
+fn target_accommodates(
+    bounds: &NumericBounds,
+    one_of_pool: Option<&Vec<f64>>,
+    value: &CandidateValue,
+) -> bool {
+    let candidate = value.as_f64();
+    let lo_ok = if bounds.lo_inclusive {
+        candidate >= bounds.lo
+    } else {
+        candidate > bounds.lo
+    };
+    let hi_ok = if bounds.hi_inclusive {
+        candidate <= bounds.hi
+    } else {
+        candidate < bounds.hi
+    };
+    if !(lo_ok && hi_ok) {
+        return false;
+    }
+    one_of_pool.is_none_or(|pool| pool.contains(&candidate))
+}
+
+fn candidate_series(name: &str, value: CandidateValue) -> PolarsResult<Series> {
+    match value {
+        CandidateValue::Signed(v) => Ok(Series::new(PlSmallStr::from(name), vec![v])),
+        CandidateValue::Float(v) => Ok(Series::new(PlSmallStr::from(name), vec![v])),
+        CandidateValue::Unsigned(v) if v <= i128::MAX as u128 => {
+            Ok(Series::new(PlSmallStr::from(name), vec![v as i128]))
+        }
+        CandidateValue::Unsigned(_) => Err(PolarsError::ComputeError(
+            "Cannot synthesize a sum target beyond the i128 range".into(),
+        )),
+    }
+}
+
+/// Enforces `target == sum(addends)` per row. The deterministic repair
+/// recomputes a violating target cell as the operand sum itself, keeping
+/// the column's own numeric constraints
+/// (bounds, membership). When that candidate is rejected, joint rejection
+/// sampling over every operand gives a bounded second chance before an
+/// honest error.
+fn enforce_sum(
+    frame: &mut HashMap<String, Series>,
+    lookup: &HashMap<&str, &ColumnSpec>,
+    rng: &mut ChaCha8Rng,
+    addends: &[String],
+    target: &str,
+    tolerance: Option<f64>,
+) -> PolarsResult<()> {
+    for name in addends {
+        if !lookup.contains_key(name.as_str()) {
+            return Err(missing_sample_column(name));
+        }
+    }
+    let target_spec = lookup
+        .get(target)
+        .copied()
+        .ok_or_else(|| missing_sample_column(target))?;
+    let tolerance_value = tolerance.unwrap_or(0.0);
+    let bounds = numeric_bounds(&specs_of(target_spec));
+    let one_of_pool = one_of_numeric_values(&specs_of(target_spec));
+    let n = frame
+        .get(target)
+        .ok_or_else(|| missing_sample_column(target))?
+        .len();
+
+    let mut addend_cells: Vec<Vec<SumCell>> = addends
+        .iter()
+        .map(|name| extract_sum_cells(frame.get(name.as_str()).unwrap()))
+        .collect::<PolarsResult<_>>()?;
+    let mut target_cells = extract_sum_cells(
+        frame
+            .get(target)
+            .ok_or_else(|| missing_sample_column(target))?,
+    )?;
+
+    for row in 0..n {
+        let addend_row: Vec<SumCell> = addend_cells.iter().map(|column| column[row]).collect();
+        let target_cell = target_cells[row];
+        if addend_row.iter().any(SumCell::is_null) || target_cell.is_null() {
+            continue; // a null operand skips the row, mirroring validation
+        }
+        let Some(sum) = row_sum(&addend_row) else {
+            continue; // exact arithmetic overflowed with present values
+        };
+        if sum_matches_target(&sum, &target_cell, tolerance_value) {
+            continue;
+        }
+        // Deterministic repair: recompute the target from its own value.
+        let desired = desired_target_value(&sum, &target_cell);
+        let repaired =
+            desired.filter(|value| target_accommodates(&bounds, one_of_pool.as_ref(), value));
+        if let Some(value) = repaired {
+            if let Ok(candidate) = candidate_series(target, value) {
+                if replace_row(frame, lookup, target, row, &candidate).is_ok() {
+                    if let Some(new_cell) = extract_sum_cells(&candidate)?.into_iter().next() {
+                        target_cells[row] = new_cell;
+                    }
+                    continue;
+                }
+            }
+        }
+        // Joint rejection sampling: redraw every operand until the sum holds.
+        let mut satisfied = false;
+        for _ in 0..200 {
+            let mut redrawn: Vec<SumCell> = Vec::with_capacity(addends.len() + 1);
+            let mut ok = true;
+            for name in addends {
+                let candidate = resample_one(rng, lookup, name)?;
+                ok &= replace_row(frame, lookup, name, row, &candidate).is_ok();
+                redrawn.push(extract_sum_cells(&candidate)?.remove(0));
+            }
+            let candidate = resample_one(rng, lookup, target)?;
+            ok &= replace_row(frame, lookup, target, row, &candidate).is_ok();
+            if !ok {
+                continue;
+            }
+            let target_value = extract_sum_cells(&candidate)?.remove(0);
+            if target_value.is_null() || redrawn.iter().any(SumCell::is_null) {
+                continue;
+            }
+            if let Some(sum) = row_sum(&redrawn) {
+                if sum_matches_target(&sum, &target_value, tolerance_value) {
+                    addend_cells
+                        .iter_mut()
+                        .zip(redrawn)
+                        .for_each(|(column, cell)| column[row] = cell);
+                    target_cells[row] = target_value;
+                    satisfied = true;
+                    break;
+                }
+            }
+        }
+        if !satisfied {
+            return Err(PolarsError::ComputeError(
+                format!(
+                    "Could not satisfy sum '{} == {}' in schema",
+                    addends
+                        .iter()
+                        .map(|name| name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" + "),
+                    target
+                )
+                .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Enforces `right - left <= max_gap_ns` on same-dtype temporal columns
+/// via joint rejection sampling over the violated row's two cells.
+fn enforce_within(
+    frame: &mut HashMap<String, Series>,
+    lookup: &HashMap<&str, &ColumnSpec>,
+    rng: &mut ChaCha8Rng,
+    left: &str,
+    right: &str,
+    max_gap_ns: i64,
+) -> PolarsResult<()> {
+    let left_spec = lookup
+        .get(left)
+        .copied()
+        .ok_or_else(|| missing_sample_column(left))?;
+    let right_spec = lookup
+        .get(right)
+        .copied()
+        .ok_or_else(|| missing_sample_column(right))?;
+    if !is_temporal_dtype(&left_spec.dtype) || !is_temporal_dtype(&right_spec.dtype) {
+        return Err(PolarsError::ComputeError(
+            format!("Cannot generate gap '{left}' ... '{right}': columns must be temporal").into(),
+        ));
+    }
+    if left_spec.dtype != right_spec.dtype {
+        return Err(PolarsError::ComputeError(
+            format!(
+                "Cannot generate gap '{left}' ... '{right}': temporal columns must share a dtype"
+            )
+            .into(),
+        ));
+    }
+    let scale = ns_per_tick(&left_spec.dtype);
+    let gap = i128::from(max_gap_ns);
+    let n = frame
+        .get(left)
+        .ok_or_else(|| missing_sample_column(left))?
+        .len();
+    let mut left_cells = int128_cells(frame.get(left).ok_or_else(|| missing_sample_column(left))?)?;
+    let mut right_cells = int128_cells(
+        frame
+            .get(right)
+            .ok_or_else(|| missing_sample_column(right))?,
+    )?;
+    for row in 0..n {
+        let within_gap = match (left_cells[row], right_cells[row]) {
+            (Some(l), Some(r)) => (r - l).checked_mul(scale).is_some_and(|d| d <= gap),
+            _ => true, // a null cell skips the row
+        };
+        if within_gap {
+            continue;
+        }
+        let mut satisfied = false;
+        for _ in 0..200 {
+            let left_candidate = resample_one(rng, lookup, left)?;
+            let right_candidate = resample_one(rng, lookup, right)?;
+            let new_left = int128_cells(&left_candidate)?.remove(0);
+            let new_right = int128_cells(&right_candidate)?.remove(0);
+            if let (Some(l), Some(r)) = (new_left, new_right) {
+                if (r - l).checked_mul(scale).is_some_and(|d| d <= gap) {
+                    replace_row(frame, lookup, left, row, &left_candidate)?;
+                    replace_row(frame, lookup, right, row, &right_candidate)?;
+                    left_cells[row] = new_left;
+                    right_cells[row] = new_right;
+                    satisfied = true;
+                    break;
+                }
+            }
+        }
+        if !satisfied {
+            return Err(PolarsError::ComputeError(
+                format!(
+                    "Could not satisfy gap constraint '{right} - {left} <= {max_gap_ns}ns' in schema"
+                )
+                .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Enforces that a present `left` value requires a present `by` value by
+/// replacing violated null cells with fresh non-null draws. Null `left`
+/// rows keep their free-form `by` nulls.
+fn enforce_implies(
+    frame: &mut HashMap<String, Series>,
+    lookup: &HashMap<&str, &ColumnSpec>,
+    rng: &mut ChaCha8Rng,
+    left: &str,
+    by: &str,
+) -> PolarsResult<()> {
+    for name in [left, by] {
+        if !lookup.contains_key(name) {
+            return Err(missing_sample_column(name));
+        }
+    }
+    let left_series = frame.get(left).ok_or_else(|| missing_sample_column(left))?;
+    let by_series = frame.get(by).ok_or_else(|| missing_sample_column(by))?;
+    let left_nulls = left_series.is_null();
+    let by_nulls = by_series.is_null();
+    for row in 0..by_series.len() {
+        // `is_null()` yields `Option<bool>`: `Some(true)` where null.
+        if left_nulls.get(row) == Some(false) && by_nulls.get(row) == Some(true) {
+            continue;
+        }
+        let mut satisfied = false;
+        for _ in 0..200 {
+            let candidate = resample_one(rng, lookup, by)?;
+            let value = candidate.get(0).ok();
+            if let Some(value) = value {
+                if !matches!(value, AnyValue::Null) {
+                    replace_row(frame, lookup, by, row, &candidate)?;
+                    satisfied = true;
+                    break;
+                }
+            }
+        }
+        if !satisfied {
+            return Err(PolarsError::ComputeError(
+                format!("Could not generate a non-null value for '{by}' in schema").into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Enforces the functional dependency `a -> b`: rows whose `b` value
+/// disagrees with the first `b` mapped from their `a` value are redrawn
+/// until they agree with the canonical mapping (or an honest error).
+/// Null `a`/`b` cells never participate.
+fn enforce_determines(
+    frame: &mut HashMap<String, Series>,
+    lookup: &HashMap<&str, &ColumnSpec>,
+    rng: &mut ChaCha8Rng,
+    a: &str,
+    b: &str,
+) -> PolarsResult<()> {
+    for name in [a, b] {
+        if !lookup.contains_key(name) {
+            return Err(missing_sample_column(name));
+        }
+    }
+    let a_series = frame.get(a).ok_or_else(|| missing_sample_column(a))?;
+    let b_series = frame.get(b).ok_or_else(|| missing_sample_column(b))?;
+    let mut first_b: HashMap<String, (String, usize)> = HashMap::new();
+    let mut violations: Vec<(usize, String)> = Vec::new();
+    for row in 0..b_series.len() {
+        let a_value = match a_series.get(row).ok() {
+            Some(value) if !matches!(value, AnyValue::Null) => format!("{value:?}"),
+            _ => continue,
+        };
+        let b_value = match b_series.get(row).ok() {
+            Some(value) if !matches!(value, AnyValue::Null) => format!("{value:?}"),
+            _ => continue,
+        };
+        match first_b.entry(a_value) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                let (seen, _) = entry.get();
+                if *seen != b_value {
+                    violations.push((row, seen.clone()));
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((b_value, row));
+            }
+        }
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    for (row, canonical) in violations {
+        let mut satisfied = false;
+        for _ in 0..200 {
+            let candidate = resample_one(rng, lookup, b)?;
+            if let Ok(value) = candidate.get(0) {
+                if !matches!(value, AnyValue::Null) && format!("{value:?}") == canonical {
+                    replace_row(frame, lookup, b, row, &candidate)?;
+                    satisfied = true;
+                    break;
+                }
+            }
+        }
+        if !satisfied {
+            return Err(PolarsError::ComputeError(
+                format!("Could not satisfy the functional dependency '{a} -> {b}' in schema")
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Generate a valid `DataFrame` satisfying the schema.
 ///
 /// Strategies are derived from each column's dtype and checks, then
@@ -1576,6 +2108,29 @@ pub fn sample(schema: &Schema, n: usize, seed: u64) -> PolarsResult<DataFrame> {
             match check.spec() {
                 DataFrameCheckSpec::ColumnComparison { left, op, right } => {
                     enforce_comparison(&mut frame, &lookup, &mut rng, &left, op, &right)?;
+                }
+                DataFrameCheckSpec::Ordered { columns, strict } => {
+                    enforce_ordered(&mut frame, &lookup, &mut rng, &columns, strict)?;
+                }
+                DataFrameCheckSpec::SumColumns {
+                    addends,
+                    target,
+                    tolerance,
+                } => {
+                    enforce_sum(&mut frame, &lookup, &mut rng, &addends, &target, tolerance)?;
+                }
+                DataFrameCheckSpec::Implies { left, by } => {
+                    enforce_implies(&mut frame, &lookup, &mut rng, &left, &by)?;
+                }
+                DataFrameCheckSpec::Determines { a, b } => {
+                    enforce_determines(&mut frame, &lookup, &mut rng, &a, &b)?;
+                }
+                DataFrameCheckSpec::Within {
+                    left,
+                    right,
+                    max_gap_ns,
+                } => {
+                    enforce_within(&mut frame, &lookup, &mut rng, &left, &right, max_gap_ns)?;
                 }
                 DataFrameCheckSpec::UniqueTogether { columns } => {
                     enforce_unique_together(&mut frame, &lookup, &mut rng, &columns)?;
@@ -2125,5 +2680,32 @@ mod tests {
             })],
         }]);
         assert!(sample(&schema, 5, 2).is_err());
+    }
+
+    #[test]
+    fn samples_satisfy_sum_columns() {
+        let schema = Schema::with_table_checks(
+            vec![
+                int_spec("a", vec![Box::new(GreaterThanF64 { min_value: 0.0 })]),
+                int_spec("b", vec![]),
+            ],
+            vec![Box::new(crate::dataframe_checks::SumColumns {
+                addends: vec!["a".to_string(), "a".to_string()],
+                target: "b".to_string(),
+                tolerance: None,
+            })],
+        );
+        let frame = sample(&schema, 10, 42).unwrap();
+        let report = schema.validate(&frame);
+        assert!(
+            report.is_valid(),
+            "{}",
+            report
+                .errors
+                .iter()
+                .map(|error| error.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
     }
 }

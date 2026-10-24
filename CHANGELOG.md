@@ -16,6 +16,19 @@ All notable changes to Framelaw are documented here. The format follows
   boolean membership in addition to strings; integer rows are compared
   exactly beyond the 2^53 float range.
 
+### Table checks
+
+- Five new cross-column checks validate whole rows across columns:
+  `framelaw.ordered(columns, strict)` (per-row chain ordering),
+  `framelaw.sum_columns(addends, target, tolerance=None)` (per-row sums,
+  exact for integers, tolerant for floats),
+  `framelaw.implies(left, by)` (presence implication),
+  `framelaw.determines(a, b)` (functional dependency), and
+  `framelaw.within(left, right, max_gap)` (temporal gap bound from a
+  `datetime.timedelta`).
+- All five persist through JSON schema round-trips, and `sample` generates
+  data satisfying them (unsatisfiable schemas error honestly).
+
 ### Data generation
 
 - `sample` honors all new checks, including string constraints and numeric

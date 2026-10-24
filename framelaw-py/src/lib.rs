@@ -1,6 +1,6 @@
 use polars::prelude::{DataFrame, NamedFrom, Series};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PyType};
+use pyo3::types::{PyAny, PyDelta, PyDict, PyList, PyType};
 use pyo3_polars::{PyDataFrame, PyDataType};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,8 @@ use framelaw_core::checks::{
 };
 use framelaw_core::column::ColumnSpec;
 use framelaw_core::dataframe_checks::{
-    ColumnComparison, CompareOp, DataFrameCheck, DataFrameCheckSpec, UniqueTogether,
+    ColumnComparison, CompareOp, DataFrameCheck, DataFrameCheckSpec, Determines, Implies, Ordered,
+    SumColumns, UniqueTogether, Within,
 };
 use framelaw_core::inference::infer_schema as infer_core_schema;
 use framelaw_core::schema::Schema;
@@ -330,6 +331,28 @@ enum TableCheckType {
     UniqueTogether {
         columns: Vec<String>,
     },
+    Ordered {
+        columns: Vec<String>,
+        strict: bool,
+    },
+    SumColumns {
+        addends: Vec<String>,
+        target: String,
+        tolerance: Option<f64>,
+    },
+    Implies {
+        left: String,
+        by: String,
+    },
+    Determines {
+        a: String,
+        b: String,
+    },
+    Within {
+        left: String,
+        right: String,
+        max_gap_ns: i64,
+    },
 }
 
 #[pyclass(module = "framelaw", name = "DataFrameCheck", from_py_object)]
@@ -347,6 +370,29 @@ impl PyDataFrameCheck {
             DataFrameCheckSpec::UniqueTogether { columns } => {
                 TableCheckType::UniqueTogether { columns }
             }
+            DataFrameCheckSpec::Ordered { columns, strict } => {
+                TableCheckType::Ordered { columns, strict }
+            }
+            DataFrameCheckSpec::SumColumns {
+                addends,
+                target,
+                tolerance,
+            } => TableCheckType::SumColumns {
+                addends,
+                target,
+                tolerance,
+            },
+            DataFrameCheckSpec::Implies { left, by } => TableCheckType::Implies { left, by },
+            DataFrameCheckSpec::Determines { a, b } => TableCheckType::Determines { a, b },
+            DataFrameCheckSpec::Within {
+                left,
+                right,
+                max_gap_ns,
+            } => TableCheckType::Within {
+                left,
+                right,
+                max_gap_ns,
+            },
         };
         Self { inner }
     }
@@ -357,6 +403,27 @@ impl PyDataFrameCheck {
                 Box::new(ColumnComparison { left, op, right })
             }
             TableCheckType::UniqueTogether { columns } => Box::new(UniqueTogether { columns }),
+            TableCheckType::Ordered { columns, strict } => Box::new(Ordered { columns, strict }),
+            TableCheckType::SumColumns {
+                addends,
+                target,
+                tolerance,
+            } => Box::new(SumColumns {
+                addends,
+                target,
+                tolerance,
+            }),
+            TableCheckType::Implies { left, by } => Box::new(Implies { left, by }),
+            TableCheckType::Determines { a, b } => Box::new(Determines { a, b }),
+            TableCheckType::Within {
+                left,
+                right,
+                max_gap_ns,
+            } => Box::new(Within {
+                left,
+                right,
+                max_gap_ns,
+            }),
         }
     }
 }
@@ -411,6 +478,119 @@ fn unique_together(columns: Vec<String>) -> PyResult<PyDataFrameCheck> {
     }
     Ok(PyDataFrameCheck {
         inner: TableCheckType::UniqueTogether { columns },
+    })
+}
+
+#[pyfunction]
+fn ordered(columns: Vec<String>, strict: bool) -> PyResult<PyDataFrameCheck> {
+    if columns.len() < 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ordered needs at least two columns",
+        ));
+    }
+    if columns.iter().any(|name| name.is_empty()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ordered column names must not be empty",
+        ));
+    }
+    let mut deduped = columns.clone();
+    deduped.sort_unstable();
+    deduped.dedup();
+    if deduped.len() != columns.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ordered column names must be distinct",
+        ));
+    }
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::Ordered { columns, strict },
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (addends, target, tolerance = None))]
+fn sum_columns(
+    addends: Vec<String>,
+    target: String,
+    tolerance: Option<f64>,
+) -> PyResult<PyDataFrameCheck> {
+    if addends.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "sum_columns needs at least one addend",
+        ));
+    }
+    if let Some(tolerance) = tolerance {
+        if !(0.0..=f64::INFINITY).contains(&tolerance) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tolerance must be a non-negative finite number",
+            ));
+        }
+    }
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::SumColumns {
+            addends,
+            target,
+            tolerance,
+        },
+    })
+}
+
+#[pyfunction]
+fn implies(left: String, by: String) -> PyResult<PyDataFrameCheck> {
+    if left == by {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "implies needs two different columns",
+        ));
+    }
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::Implies { left, by },
+    })
+}
+
+#[pyfunction]
+fn determines(a: String, b: String) -> PyResult<PyDataFrameCheck> {
+    if a == b {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "determines needs two different columns",
+        ));
+    }
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::Determines { a, b },
+    })
+}
+
+/// Builds the per-row temporal gap bound from a Python `timedelta`.
+/// Resolution is microseconds, scaled up to nanoseconds; the bound is
+/// interpreted against the shared dtype's time unit by the core.
+fn timedelta_gap_ns(max_gap: &Bound<'_, PyDelta>) -> PyResult<i64> {
+    let days = max_gap.getattr("days")?.extract::<i64>()?;
+    let seconds = max_gap.getattr("seconds")?.extract::<i64>()?;
+    let microseconds = max_gap.getattr("microseconds")?.extract::<i64>()?;
+    let nanoseconds = days
+        .checked_mul(86_400_000_000_000)
+        .and_then(|n| n.checked_add(seconds * 1_000_000_000))
+        .and_then(|n| n.checked_add(microseconds * 1_000));
+    match nanoseconds {
+        Some(ns) => Ok(ns),
+        None => Err(pyo3::exceptions::PyValueError::new_err(
+            "max_gap exceeds the storable nanosecond range",
+        )),
+    }
+}
+
+#[pyfunction]
+fn within(left: String, right: String, max_gap: &Bound<'_, PyDelta>) -> PyResult<PyDataFrameCheck> {
+    if left == right {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "within needs two different columns",
+        ));
+    }
+    let max_gap_ns = timedelta_gap_ns(max_gap)?;
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::Within {
+            left,
+            right,
+            max_gap_ns,
+        },
     })
 }
 
@@ -517,7 +697,7 @@ enum JsonCheck {
     },
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 enum JsonTableCheck {
     ColumnComparison {
@@ -527,6 +707,29 @@ enum JsonTableCheck {
     },
     UniqueTogether {
         columns: Vec<String>,
+    },
+    Ordered {
+        columns: Vec<String>,
+        strict: bool,
+    },
+    SumColumns {
+        addends: Vec<String>,
+        target: String,
+        #[serde(default)]
+        tolerance: Option<f64>,
+    },
+    Implies {
+        left: String,
+        by: String,
+    },
+    Determines {
+        a: String,
+        b: String,
+    },
+    Within {
+        left: String,
+        right: String,
+        max_gap_ns: i64,
     },
 }
 
@@ -1246,6 +1449,36 @@ impl PySchema {
             TableCheckType::UniqueTogether { columns } => JsonTableCheck::UniqueTogether {
                 columns: columns.clone(),
             },
+            TableCheckType::Ordered { columns, strict } => JsonTableCheck::Ordered {
+                columns: columns.clone(),
+                strict: *strict,
+            },
+            TableCheckType::SumColumns {
+                addends,
+                target,
+                tolerance,
+            } => JsonTableCheck::SumColumns {
+                addends: addends.clone(),
+                target: target.clone(),
+                tolerance: *tolerance,
+            },
+            TableCheckType::Implies { left, by } => JsonTableCheck::Implies {
+                left: left.clone(),
+                by: by.clone(),
+            },
+            TableCheckType::Determines { a, b } => JsonTableCheck::Determines {
+                a: a.clone(),
+                b: b.clone(),
+            },
+            TableCheckType::Within {
+                left,
+                right,
+                max_gap_ns,
+            } => JsonTableCheck::Within {
+                left: left.clone(),
+                right: right.clone(),
+                max_gap_ns: *max_gap_ns,
+            },
         }
     }
 
@@ -1263,6 +1496,25 @@ impl PySchema {
                 ))),
             },
             JsonTableCheck::UniqueTogether { columns } => unique_together(columns),
+            JsonTableCheck::Ordered { columns, strict } => ordered(columns, strict),
+            JsonTableCheck::SumColumns {
+                addends,
+                target,
+                tolerance,
+            } => sum_columns(addends, target, tolerance),
+            JsonTableCheck::Implies { left, by } => implies(left, by),
+            JsonTableCheck::Determines { a, b } => determines(a, b),
+            JsonTableCheck::Within {
+                left,
+                right,
+                max_gap_ns,
+            } => Ok(PyDataFrameCheck {
+                inner: TableCheckType::Within {
+                    left,
+                    right,
+                    max_gap_ns,
+                },
+            }),
         }
     }
 
@@ -1657,6 +1909,11 @@ fn _framelaw(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eq_columns, m)?)?;
     m.add_function(wrap_pyfunction!(ne_columns, m)?)?;
     m.add_function(wrap_pyfunction!(unique_together, m)?)?;
+    m.add_function(wrap_pyfunction!(ordered, m)?)?;
+    m.add_function(wrap_pyfunction!(sum_columns, m)?)?;
+    m.add_function(wrap_pyfunction!(implies, m)?)?;
+    m.add_function(wrap_pyfunction!(determines, m)?)?;
+    m.add_function(wrap_pyfunction!(within, m)?)?;
     m.add_function(wrap_pyfunction!(infer_schema, m)?)?;
     m.add_function(wrap_pyfunction!(sample_function, m)?)?;
 

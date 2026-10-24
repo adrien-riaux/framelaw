@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from importlib import metadata
 from typing import Literal
 
@@ -404,6 +404,175 @@ def test_cross_column_json_round_trip() -> None:
     assert restored.validate(pl.DataFrame({"start": [1], "end": [2]})) is None
     report = restored.validate(pl.DataFrame({"start": [5], "end": [2]}), raise_on_error=False)
     assert not report.is_valid()
+
+
+def test_ordered_chain_reports_rows() -> None:
+    """Validate the per-row chain `a <= b <= c` (and strict mode)."""
+    schema = fl.Schema(
+        {"a": fl.Column(pl.Int64), "b": fl.Column(pl.Int64), "c": fl.Column(pl.Int64)},
+        dataframe_checks=[fl.ordered(["a", "b", "c"], strict=False)],
+    )
+    report = schema.validate(
+        pl.DataFrame({"a": [1, 9, 2], "b": [2, 2, 4], "c": [3, 5, 7]}), raise_on_error=False
+    )
+    assert not report.is_valid()
+    assert sorted({row for error in report.errors for row in error.rows}) == [1]
+
+    strict = fl.Schema(
+        {"a": fl.Column(pl.Int64), "b": fl.Column(pl.Int64), "c": fl.Column(pl.Int64)},
+        dataframe_checks=[fl.ordered(["a", "b", "c"], strict=True)],
+    )
+    report = strict.validate(
+        pl.DataFrame({"a": [1, 2, 2], "b": [2, 2, 3], "c": [3, 3, 4]}), raise_on_error=False
+    )
+    assert not report.is_valid()
+    assert sorted({row for error in report.errors for row in error.rows}) == [1]
+
+
+def test_sum_columns_reports_mismatched_rows() -> None:
+    """Check `target == sum(addends)` exactly for ints, tolerantly for floats."""
+    int_schema = fl.Schema(
+        {"a": fl.Column(pl.Int64), "b": fl.Column(pl.Int64), "c": fl.Column(pl.Int64)},
+        dataframe_checks=[fl.sum_columns(["a", "b"], "c")],
+    )
+    report = int_schema.validate(
+        pl.DataFrame({"a": [1, 2], "b": [2, 3], "c": [3, 9]}), raise_on_error=False
+    )
+    assert not report.is_valid()
+    assert report.errors[0].rows == [1]
+
+    float_schema = fl.Schema(
+        {"a": fl.Column(pl.Float64), "b": fl.Column(pl.Float64), "c": fl.Column(pl.Float64)},
+        dataframe_checks=[fl.sum_columns(["a", "b"], "c", tolerance=1e-9)],
+    )
+    assert float_schema.validate(pl.DataFrame({"a": [0.1], "b": [0.2], "c": [0.3]})) is None
+    report = float_schema.validate(
+        pl.DataFrame({"a": [1.0], "b": [1.0], "c": [10.0]}), raise_on_error=False
+    )
+    assert not report.is_valid()
+    assert report.errors[0].rows == [0]
+
+
+def test_implies_reports_missing_values() -> None:
+    """Non-null left values require a present `by` value."""
+    schema = fl.Schema(
+        {"left": fl.Column(pl.Int64), "by": fl.Column(pl.String)},
+        dataframe_checks=[fl.implies("left", "by")],
+    )
+    report = schema.validate(
+        pl.DataFrame({"left": [1, None, 3], "by": ["x", None, None]}), raise_on_error=False
+    )
+    assert not report.is_valid()
+    assert report.errors[0].rows == [2]
+    assert schema.validate(pl.DataFrame({"left": [1, None], "by": ["x", None]})) is None
+
+
+def test_determines_reports_conflicting_groups() -> None:
+    """Every `a` value must map to a single `b` value."""
+    schema = fl.Schema(
+        {"a": fl.Column(pl.String), "b": fl.Column(pl.Int64)},
+        dataframe_checks=[fl.determines("a", "b")],
+    )
+    report = schema.validate(
+        pl.DataFrame({"a": ["x", "x", "y"], "b": [1, 2, 3]}), raise_on_error=False
+    )
+    assert not report.is_valid()
+    assert report.errors[0].rows == [0, 1]
+    assert schema.validate(pl.DataFrame({"a": ["x", "x", "y"], "b": [1, 1, 2]})) is None
+
+
+def test_within_temporal_gap() -> None:
+    """Bound the gap between two temporal columns with a timedelta."""
+    schema = fl.Schema(
+        {
+            "start": fl.Column(pl.Date),
+            "end": fl.Column(pl.Date),
+        },
+        dataframe_checks=[fl.within("start", "end", timedelta(days=3))],
+    )
+    epoch = date(1970, 1, 1)
+    assert (
+        schema.validate(pl.DataFrame({"start": [epoch], "end": [epoch + timedelta(days=3)]}))
+        is None
+    )
+    report = schema.validate(
+        pl.DataFrame({"start": [epoch], "end": [epoch + timedelta(days=4)]}), raise_on_error=False
+    )
+    assert not report.is_valid()
+    assert report.errors[0].rows == [0]
+
+
+def test_new_table_checks_json_round_trip() -> None:
+    """All five cross-column checks survive to_json/from_json."""
+    schema = fl.Schema(
+        {
+            "a": fl.Column(pl.Int64),
+            "b": fl.Column(pl.Int64),
+            "start": fl.Column(pl.Date),
+            "end": fl.Column(pl.Date),
+            "free": fl.Column(pl.String),
+        },
+        dataframe_checks=[
+            fl.ordered(["a", "b"], strict=False),
+            fl.sum_columns(["a", "a"], "b"),
+            fl.implies("a", "free"),
+            fl.determines("a", "free"),
+            fl.within("start", "end", timedelta(days=2)),
+        ],
+    )
+    restored = fl.Schema.from_json(schema.to_json())
+    assert (
+        restored.validate(
+            pl.DataFrame(
+                {
+                    "a": [1, 2],
+                    "b": [2, 4],
+                    "start": [date(1970, 1, 1), date(1970, 1, 1)],
+                    "end": [date(1970, 1, 3), date(1970, 1, 2)],
+                    "free": ["x", "x"],
+                }
+            )
+        )
+        is None
+    )
+    report = restored.validate(
+        pl.DataFrame(
+            {
+                "a": [5, 1],
+                "b": [2, 4],
+                "start": [date(1970, 1, 1), date(1970, 1, 1)],
+                "end": [date(1970, 1, 9), date(1970, 1, 2)],
+                "free": ["x", "x"],
+            }
+        ),
+        raise_on_error=False,
+    )
+    assert not report.is_valid()
+
+
+def test_new_table_checks_generation() -> None:
+    """sample() produces frames satisfying the new cross-column checks."""
+    schema = fl.Schema(
+        {
+            "a": fl.Column(pl.Int64, checks=[fl.gt(0)]),
+            "b": fl.Column(pl.Int64),
+            "start": fl.Column(pl.Date),
+            "end": fl.Column(pl.Date),
+            "left": fl.Column(pl.Int64, nullable=False),
+            "by": fl.Column(pl.String),
+            "dup": fl.Column(pl.String),
+            "code": fl.Column(pl.Int64),
+        },
+        dataframe_checks=[
+            fl.ordered(["a", "b"], strict=False),
+            fl.sum_columns(["a", "a"], "b"),
+            fl.implies("left", "by"),
+            fl.determines("dup", "code"),
+            fl.within("start", "end", timedelta(days=30)),
+        ],
+    )
+    data = fl.sample(schema, 25, seed=7)
+    assert schema.validate(data.cast({"start": pl.Date, "end": pl.Date})) is None
 
 
 def test_nested_list_checks_and_json() -> None:
