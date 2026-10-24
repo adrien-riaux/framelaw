@@ -15,6 +15,11 @@ pub enum CheckSpec {
     Between(f64, f64),
     Matches(String),
     OneOf(Vec<String>),
+    OneOfNumeric(Vec<f64>),
+    StrLengthBetween(usize, usize),
+    NotBlank,
+    StartsWith(String),
+    EndsWith(String),
     ListLenBetween(usize, usize),
     ListNotEmpty,
     StructField(String, Vec<CheckSpec>),
@@ -372,6 +377,348 @@ impl Check for OneOfString {
     }
 }
 
+/// Checks that all numeric/boolean values are within an allowed set.
+pub struct OneOfNumericValues {
+    pub allowed_values: Vec<f64>,
+}
+
+impl OneOfNumericValues {
+    /// Exact membership sets derived from the allowed values: integers
+    /// within the i128 and u128 domains, plus an f64 pool for float rows.
+    /// A value enters an integer set only when the `f64 -> int -> f64`
+    /// round-trip is exact, so integer equality never goes through a
+    /// lossy comparison.
+    fn exact_sets(&self) -> (HashSet<i128>, HashSet<u128>, Vec<f64>) {
+        let mut signed = HashSet::with_capacity(self.allowed_values.len());
+        let mut unsigned = HashSet::with_capacity(self.allowed_values.len());
+        let mut floats: Vec<f64> = self
+            .allowed_values
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect();
+        floats.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        floats.dedup();
+        for value in &self.allowed_values {
+            if let Some(i) = exact_i128_value(*value) {
+                signed.insert(i);
+            }
+            if let Some(u) = exact_u128_value(*value) {
+                unsigned.insert(u);
+            }
+        }
+        (signed, unsigned, floats)
+    }
+}
+
+/// A finite, integral `f64` that is exactly representable as an `i128`.
+/// Integral `f64` values strictly inside the domain edge bounds cast
+/// exactly; the fractional test plus the edge bounds make edge-of-domain
+/// cases (e.g. `2^127`, which saturates) return `None` instead.
+pub(crate) fn exact_i128_value(value: f64) -> Option<i128> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return None;
+    }
+    if !(-TWO_POW_127..TWO_POW_127).contains(&value) {
+        return None;
+    }
+    Some(value as i128)
+}
+
+/// Companion of `exact_i128_value` for the unsigned domain.
+pub(crate) fn exact_u128_value(value: f64) -> Option<u128> {
+    if !value.is_finite() || value.fract() != 0.0 || value < 0.0 {
+        return None;
+    }
+    if value >= TWO_POW_128 {
+        return None;
+    }
+    Some(value as u128)
+}
+
+fn int_not_in_rows_i128(values: &Int128Chunked, allowed: &HashSet<i128>) -> Vec<usize> {
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(i, cell)| match cell {
+            Some(value) if !allowed.contains(&value) => Some(i),
+            _ => None,
+        })
+        .collect()
+}
+
+fn int_not_in_rows_u128(values: &UInt128Chunked, allowed: &HashSet<u128>) -> Vec<usize> {
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(i, cell)| match cell {
+            Some(value) if !allowed.contains(&value) => Some(i),
+            _ => None,
+        })
+        .collect()
+}
+
+fn float_not_in_rows(values: &Float64Chunked, allowed: &[f64]) -> Vec<usize> {
+    values
+        .iter()
+        .enumerate()
+        .filter_map(|(i, cell)| match cell {
+            Some(value)
+                if allowed
+                    .binary_search_by(|p| p.partial_cmp(&value).unwrap())
+                    .is_err() =>
+            {
+                Some(i)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+impl Check for OneOfNumericValues {
+    fn name(&self) -> &str {
+        "OneOfNumeric"
+    }
+    fn spec(&self) -> CheckSpec {
+        CheckSpec::OneOfNumeric(self.allowed_values.clone())
+    }
+    fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
+        let (allow_i, allow_u, allow_f) = self.exact_sets();
+        // Booleans compare after widening to Int64, matching the generation
+        // side where `[true]` becomes the numeric pool `{1.0}`.
+        let bool_wide: Option<Series> = match series.dtype() {
+            DataType::Boolean => match series.cast(&DataType::Int64) {
+                Ok(wide) => Some(wide),
+                Err(_) => {
+                    return vec![type_mismatch_error(
+                        column_name,
+                        self.name(),
+                        "Boolean, a numeric type, or temporal",
+                    )]
+                }
+            },
+            _ => None,
+        };
+        let target: &Series = bool_wide.as_ref().unwrap_or(series);
+        let rows: PolarsResult<Vec<usize>> = (|| match int_domain(target.dtype()) {
+            Some(IntDomain::I128) => Ok(int_not_in_rows_i128(
+                target.cast(&DataType::Int128)?.i128()?,
+                &allow_i,
+            )),
+            Some(IntDomain::U128) => Ok(int_not_in_rows_u128(
+                target.cast(&DataType::UInt128)?.u128()?,
+                &allow_u,
+            )),
+            None if is_supported_numeric_dtype(target.dtype()) => {
+                Ok(float_not_in_rows(&numeric_series(target)?, &allow_f))
+            }
+            None => Err(PolarsError::ComputeError(
+                "expected a membership type".into(),
+            )),
+        })();
+        match rows {
+            Ok(rows) if !rows.is_empty() => vec![ValidationError::single(
+                column_name,
+                self.name(),
+                rows,
+                format!(
+                    "Values in '{}' are not part of the allowed set",
+                    column_name
+                ),
+            )],
+            Ok(_) => Vec::new(),
+            Err(_) => vec![type_mismatch_error(
+                column_name,
+                self.name(),
+                "Boolean, a numeric type, or temporal",
+            )],
+        }
+    }
+}
+
+/// Checks that string values are within `[min_len, max_len]` characters.
+/// Rows outside the range are collected into one error and nulls are
+/// skipped, mirroring the other string checks.
+pub struct StrLengthBetween {
+    pub min_len: usize,
+    pub max_len: usize,
+}
+
+impl Check for StrLengthBetween {
+    fn name(&self) -> &str {
+        "StrLengthBetween"
+    }
+    fn spec(&self) -> CheckSpec {
+        CheckSpec::StrLengthBetween(self.min_len, self.max_len)
+    }
+    fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+
+        if let Ok(ca) = series.str() {
+            let mut failed_rows = Vec::new();
+
+            for (i, val_opt) in ca.iter().enumerate() {
+                if let Some(val) = val_opt {
+                    let len = val.chars().count();
+                    if len < self.min_len || len > self.max_len {
+                        failed_rows.push(i);
+                    }
+                }
+            }
+
+            if !failed_rows.is_empty() {
+                errors.push(ValidationError::single(
+                    column_name,
+                    self.name(),
+                    failed_rows,
+                    format!(
+                        "Values in '{}' must have length between {} and {} characters",
+                        column_name, self.min_len, self.max_len
+                    ),
+                ));
+            }
+        } else {
+            errors.push(type_mismatch_error(column_name, self.name(), "String"));
+        }
+
+        errors
+    }
+}
+
+/// Checks that string values are never empty or whitespace-only. Nulls are
+/// skipped; trimming follows Rust's Unicode-aware `str::trim`.
+pub struct NotBlank;
+
+impl Check for NotBlank {
+    fn name(&self) -> &str {
+        "NotBlank"
+    }
+    fn spec(&self) -> CheckSpec {
+        CheckSpec::NotBlank
+    }
+    fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+
+        if let Ok(ca) = series.str() {
+            let mut failed_rows = Vec::new();
+
+            for (i, val_opt) in ca.iter().enumerate() {
+                if let Some(val) = val_opt {
+                    if val.trim().is_empty() {
+                        failed_rows.push(i);
+                    }
+                }
+            }
+
+            if !failed_rows.is_empty() {
+                errors.push(ValidationError::single(
+                    column_name,
+                    self.name(),
+                    failed_rows,
+                    format!(
+                        "Values in '{}' must not be blank (empty or whitespace-only)",
+                        column_name
+                    ),
+                ));
+            }
+        } else {
+            errors.push(type_mismatch_error(column_name, self.name(), "String"));
+        }
+
+        errors
+    }
+}
+
+/// Checks that string values start with the given prefix.
+pub struct StartsWith {
+    pub prefix: String,
+}
+
+impl Check for StartsWith {
+    fn name(&self) -> &str {
+        "StartsWith"
+    }
+    fn spec(&self) -> CheckSpec {
+        CheckSpec::StartsWith(self.prefix.clone())
+    }
+    fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+
+        if let Ok(ca) = series.str() {
+            let mut failed_rows = Vec::new();
+
+            for (i, val_opt) in ca.iter().enumerate() {
+                if let Some(val) = val_opt {
+                    if !val.starts_with(self.prefix.as_str()) {
+                        failed_rows.push(i);
+                    }
+                }
+            }
+
+            if !failed_rows.is_empty() {
+                errors.push(ValidationError::single(
+                    column_name,
+                    self.name(),
+                    failed_rows,
+                    format!(
+                        "Values in '{}' must start with '{}'",
+                        column_name, self.prefix
+                    ),
+                ));
+            }
+        } else {
+            errors.push(type_mismatch_error(column_name, self.name(), "String"));
+        }
+
+        errors
+    }
+}
+
+/// Checks that string values end with the given suffix.
+pub struct EndsWith {
+    pub suffix: String,
+}
+
+impl Check for EndsWith {
+    fn name(&self) -> &str {
+        "EndsWith"
+    }
+    fn spec(&self) -> CheckSpec {
+        CheckSpec::EndsWith(self.suffix.clone())
+    }
+    fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
+        let mut errors = Vec::new();
+
+        if let Ok(ca) = series.str() {
+            let mut failed_rows = Vec::new();
+
+            for (i, val_opt) in ca.iter().enumerate() {
+                if let Some(val) = val_opt {
+                    if !val.ends_with(self.suffix.as_str()) {
+                        failed_rows.push(i);
+                    }
+                }
+            }
+
+            if !failed_rows.is_empty() {
+                errors.push(ValidationError::single(
+                    column_name,
+                    self.name(),
+                    failed_rows,
+                    format!(
+                        "Values in '{}' must end with '{}'",
+                        column_name, self.suffix
+                    ),
+                ));
+            }
+        } else {
+            errors.push(type_mismatch_error(column_name, self.name(), "String"));
+        }
+
+        errors
+    }
+}
+
 // --- Helper Functions ---
 
 /// Whether a dtype can be coerced to f64 for numeric checks and sampling.
@@ -678,6 +1025,20 @@ pub fn check_from_spec(spec: &CheckSpec) -> PolarsResult<Box<dyn Check>> {
         }),
         CheckSpec::OneOf(values) => Box::new(OneOfString {
             allowed_values: values.iter().cloned().collect(),
+        }),
+        CheckSpec::OneOfNumeric(values) => Box::new(OneOfNumericValues {
+            allowed_values: values.clone(),
+        }),
+        CheckSpec::StrLengthBetween(min_len, max_len) => Box::new(StrLengthBetween {
+            min_len: *min_len,
+            max_len: *max_len,
+        }),
+        CheckSpec::NotBlank => Box::new(NotBlank),
+        CheckSpec::StartsWith(prefix) => Box::new(StartsWith {
+            prefix: prefix.clone(),
+        }),
+        CheckSpec::EndsWith(suffix) => Box::new(EndsWith {
+            suffix: suffix.clone(),
         }),
         CheckSpec::ListLenBetween(lo, hi) => Box::new(ListLenBetween {
             min_len: *lo,
@@ -1051,5 +1412,157 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].rows, vec![1]);
         assert!(errors[0].message.contains("zip"));
+    }
+
+    #[test]
+    fn str_length_between_reports_short_and_long_rows() {
+        let series = Series::new(
+            "code".into(),
+            [Some("abc"), Some("a"), Some("toolongvalue"), None],
+        );
+        let check = StrLengthBetween {
+            min_len: 2,
+            max_len: 5,
+        };
+
+        let errors = check.validate("code", &series);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![1, 2]);
+    }
+
+    fn string_series(values: &[&str]) -> Series {
+        Series::new("s".into(), values.to_vec())
+    }
+
+    fn collect_rows(check: &dyn Check, series: &Series) -> Vec<usize> {
+        let errors = check.validate("s", series);
+        assert_eq!(errors.len(), 1);
+        errors[0].rows.clone()
+    }
+
+    #[test]
+    fn not_blank_flags_empty_and_whitespace_only() {
+        let series = string_series(&["ok", "", "   ", "\t\n"]);
+        let rows = collect_rows(&NotBlank, &series);
+        assert_eq!(rows, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn not_blank_skips_nulls() {
+        let series = Series::new("s".into(), [Some("a"), None, Some("  ")]);
+        let rows = collect_rows(&NotBlank, &series);
+        assert_eq!(rows, vec![2]);
+    }
+
+    #[test]
+    fn not_blank_rejects_non_string_columns() {
+        let series = Series::new("s".into(), [1i64, 2]);
+        let errors = NotBlank.validate("s", &series);
+        assert!(errors[0].message.contains("String"));
+    }
+
+    #[test]
+    fn starts_with_and_ends_with_report_prefix_suffix_rows() {
+        let series = string_series(&["tag-1", "other", "tag-2"]);
+        let prefix = StartsWith {
+            prefix: "tag-".to_string(),
+        };
+        let suffix = EndsWith {
+            suffix: "-1".to_string(),
+        };
+
+        assert_eq!(collect_rows(&prefix, &series), vec![1]);
+        assert_eq!(collect_rows(&suffix, &series), vec![1, 2]);
+    }
+
+    #[test]
+    fn str_length_between_counts_characters_not_bytes() {
+        let series = string_series(&["ééé", "aaaa"]);
+        // é is one character but two bytes; a 3-char minimum passes despite
+        // a 6-byte length.
+        let check = StrLengthBetween {
+            min_len: 3,
+            max_len: 4,
+        };
+        let errors = check.validate("s", &series);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn one_of_numeric_matches_integers_exactly() {
+        // 2^54 is representable in f64, but 2^54 - 1 is not: it rounds UP to
+        // 2^54. A float-equality implementation would wrongly accept the
+        // row; the integer path reports it.
+        let base: i64 = 1 << 54;
+        let series = Series::new("n".into(), [base - 1, base]);
+        let check = OneOfNumericValues {
+            allowed_values: vec![base as f64],
+        };
+
+        let errors = check.validate("n", &series);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![0]);
+    }
+
+    #[test]
+    fn one_of_numeric_supports_floats_bools_and_nulls() {
+        let floats = Series::new("f".into(), [0.5f64, 0.7, 1.5]);
+        let bools = Series::new("b".into(), [true, false, true]);
+        let nullable = Series::new("n".into(), [Some(2i32), None, Some(4), Some(7)]);
+
+        let float_check = OneOfNumericValues {
+            allowed_values: vec![0.5, 1.5],
+        };
+        let bool_check = OneOfNumericValues {
+            allowed_values: vec![1.0],
+        };
+        let int_check = OneOfNumericValues {
+            allowed_values: vec![2.0, 4.0],
+        };
+
+        assert_eq!(collect_rows(&float_check, &floats), vec![1]);
+        assert_eq!(collect_rows(&bool_check, &bools), vec![1]);
+        assert_eq!(collect_rows(&int_check, &nullable), vec![3]);
+    }
+
+    #[test]
+    fn one_of_numeric_rejects_string_columns() {
+        let series = string_series(&["1", "2"]);
+        let check = OneOfNumericValues {
+            allowed_values: vec![1.0],
+        };
+
+        let errors = check.validate("s", &series);
+
+        assert!(errors[0].message.contains("Boolean"));
+    }
+
+    #[test]
+    fn one_of_numeric_empty_allowed_set_fails_every_value() {
+        let series = Series::new("n".into(), [1i64, 2]);
+        let check = OneOfNumericValues {
+            allowed_values: vec![],
+        };
+
+        let errors = check.validate("n", &series);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![0, 1]);
+    }
+
+    #[test]
+    fn one_of_numeric_values_are_exactly_representable_only() {
+        // 2^127 is outside the i128 domain, so no integer row can equal it;
+        // it must not be rounded into the member set.
+        let allowed = vec![170141183460469231731687303715884105728.0];
+        let series = Series::new("n".into(), [i128::MAX]);
+        let check = OneOfNumericValues {
+            allowed_values: allowed,
+        };
+
+        let errors = check.validate("n", &series);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rows, vec![0]);
     }
 }

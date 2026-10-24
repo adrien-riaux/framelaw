@@ -7,7 +7,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use regex::Regex;
 
-use crate::checks::{is_supported_numeric_dtype, CheckSpec};
+use crate::checks::{exact_i128_value, exact_u128_value, is_supported_numeric_dtype, CheckSpec};
 use crate::column::ColumnSpec;
 use crate::dataframe_checks::{
     cmp_mixed_int_uint, int128_cells, is_temporal_dtype, uint128_cells, CompareOp,
@@ -165,6 +165,131 @@ fn matches_patterns(specs: &[CheckSpec]) -> Vec<String> {
         .collect()
 }
 
+fn one_of_numeric_values(specs: &[CheckSpec]) -> Option<Vec<f64>> {
+    let mut values: Option<Vec<f64>> = None;
+    for spec in specs {
+        if let CheckSpec::OneOfNumeric(next) = spec {
+            values = Some(match values {
+                // Intersect multiple one_of constraints; disjoint sets are
+                // reported as unsatisfiable by callers when nothing remains.
+                Some(mut allowed) => {
+                    allowed.retain(|value| next.contains(value));
+                    allowed
+                }
+                None => next.clone(),
+            });
+        }
+    }
+    values
+}
+
+/// String constraints derived from the string checks: every generated value
+/// must satisfy the length bounds, never be blank, start with every locked
+/// prefix, and end with every locked suffix.
+#[derive(Default)]
+struct StringConstraints {
+    min_len: Option<usize>,
+    max_len: Option<usize>,
+    prefixes: Vec<String>,
+    suffixes: Vec<String>,
+    forbid_blank: bool,
+}
+
+fn string_constraints(specs: &[CheckSpec]) -> StringConstraints {
+    let mut out = StringConstraints::default();
+    for spec in specs {
+        match spec {
+            CheckSpec::StrLengthBetween(lo, hi) => {
+                out.min_len = Some(out.min_len.map_or(*lo, |min| min.max(*lo)));
+                out.max_len = Some(out.max_len.map_or(*hi, |max| max.min(*hi)));
+            }
+            CheckSpec::NotBlank => out.forbid_blank = true,
+            CheckSpec::StartsWith(prefix) => out.prefixes.push(prefix.clone()),
+            CheckSpec::EndsWith(suffix) => out.suffixes.push(suffix.clone()),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn longest_constraint(values: &[String]) -> Option<&str> {
+    values
+        .iter()
+        .max_by_key(|value| value.chars().count())
+        .map(|value| value.as_str())
+}
+
+fn satisfies_string_constraints(value: &str, constraints: &StringConstraints) -> bool {
+    if constraints.forbid_blank && value.trim().is_empty() {
+        return false;
+    }
+    let len = value.chars().count();
+    if let Some(min_len) = constraints.min_len {
+        if len < min_len {
+            return false;
+        }
+    }
+    if let Some(max_len) = constraints.max_len {
+        if len > max_len {
+            return false;
+        }
+    }
+    constraints
+        .prefixes
+        .iter()
+        .all(|prefix| value.starts_with(prefix))
+        && constraints
+            .suffixes
+            .iter()
+            .all(|suffix| value.ends_with(suffix))
+}
+
+/// Builds the smallest value satisfying the constraints: the longest
+/// prefix/suffix plus a filler core. Returns `None` when constraints
+/// conflict (e.g. a suffix alone longer than `max_len`), so callers report
+/// unsatisfiability honestly instead of emitting invalid values.
+fn fitting_string(constraints: &StringConstraints) -> Option<String> {
+    let prefix = longest_constraint(&constraints.prefixes).unwrap_or("");
+    let suffix = longest_constraint(&constraints.suffixes).unwrap_or("");
+    let overhead = prefix.chars().count() + suffix.chars().count();
+    let min_len = constraints.min_len.unwrap_or(0);
+    let max_len = constraints.max_len.unwrap_or(usize::MAX);
+    if min_len > max_len || overhead > max_len {
+        return None;
+    }
+    let core = if min_len > overhead + 3 {
+        min_len - overhead
+    } else {
+        3
+    };
+    let value = format!("{prefix}{}{suffix}", "x".repeat(core));
+    satisfies_string_constraints(&value, constraints).then_some(value)
+}
+
+/// Extends (or rejects) a candidate so it satisfies the string constraints.
+/// Extension only ever adds characters; when the result would exceed
+/// `max_len`, `None` signals that the candidate cannot be repaired.
+fn enforce_string_constraints(base: String, constraints: &StringConstraints) -> Option<String> {
+    let mut value = base;
+    if let Some(prefix) = longest_constraint(&constraints.prefixes) {
+        if !value.starts_with(prefix) {
+            value = format!("{prefix}{value}");
+        }
+    }
+    if let Some(min_len) = constraints.min_len {
+        if value.chars().count() < min_len {
+            // Pad the core, before any suffix, so the suffix stays last.
+            value = format!("{value}{}", "x".repeat(min_len - value.chars().count()));
+        }
+    }
+    if let Some(suffix) = longest_constraint(&constraints.suffixes) {
+        if !value.ends_with(suffix) {
+            value = format!("{value}{suffix}");
+        }
+    }
+    satisfies_string_constraints(&value, constraints).then_some(value)
+}
+
 fn has_unique(specs: &[CheckSpec]) -> bool {
     specs
         .iter()
@@ -207,9 +332,9 @@ fn struct_field_specs(specs: &[CheckSpec], field: &str) -> Vec<CheckSpec> {
     out
 }
 
-/// String values satisfying both membership and regex constraints, or `None`
-/// when no membership constraint exists. Errors on empty intersections so
-/// callers never sample values that fail their own schema.
+/// String values satisfying membership, regex, and the string constraints,
+/// or `None` when no membership constraint exists. Errors on empty
+/// intersections so callers never sample values that fail their own schema.
 fn allowed_strings(specs: &[CheckSpec]) -> PolarsResult<Option<Vec<String>>> {
     let Some(allowed) = one_of_values(specs) else {
         return Ok(None);
@@ -219,36 +344,48 @@ fn allowed_strings(specs: &[CheckSpec]) -> PolarsResult<Option<Vec<String>>> {
             "Unsatisfiable one_of with no allowed values".into(),
         ));
     }
-    let patterns = matches_patterns(specs);
-    if patterns.is_empty() {
-        return Ok(Some(allowed));
-    }
-    let regexes = patterns
-        .iter()
-        .map(|pattern| {
-            Regex::new(pattern)
-                .map_err(|_| PolarsError::ComputeError(format!("Invalid regex: {pattern}").into()))
-        })
-        .collect::<PolarsResult<Vec<_>>>()?;
-    let matching: Vec<String> = allowed
+    let constraints = string_constraints(specs);
+    let mut candidates: Vec<String> = allowed
         .into_iter()
-        .filter(|value| regexes.iter().all(|regex| regex.is_match(value)))
+        .filter(|value| satisfies_string_constraints(value, &constraints))
         .collect();
-    if matching.is_empty() {
+    let patterns = matches_patterns(specs);
+    if !patterns.is_empty() {
+        let regexes = patterns
+            .iter()
+            .map(|pattern| {
+                Regex::new(pattern).map_err(|_| {
+                    PolarsError::ComputeError(format!("Invalid regex: {pattern}").into())
+                })
+            })
+            .collect::<PolarsResult<Vec<_>>>()?;
+        candidates.retain(|value| regexes.iter().all(|regex| regex.is_match(value)));
+    }
+    if candidates.is_empty() {
         return Err(PolarsError::ComputeError(
-            "Unsatisfiable one_of and matches constraints in schema".into(),
+            "Unsatisfiable one_of and string constraints in schema".into(),
         ));
     }
-    Ok(Some(matching))
+    Ok(Some(candidates))
 }
 
 fn gen_string_value(rng: &mut ChaCha8Rng, specs: &[CheckSpec], row: usize) -> PolarsResult<String> {
     if let Some(allowed) = allowed_strings(specs)? {
         return Ok(allowed[rng.random_range(0..allowed.len())].clone());
     }
+    let constraints = string_constraints(specs);
     let patterns = matches_patterns(specs);
     if patterns.is_empty() {
-        return Ok(format!("value-{row}"));
+        let base = format!("value-{row}");
+        if let Some(value) = enforce_string_constraints(base, &constraints) {
+            return Ok(value);
+        }
+        return match fitting_string(&constraints) {
+            Some(value) => Ok(value),
+            None => Err(PolarsError::ComputeError(
+                "Unsatisfiable string constraints in schema".into(),
+            )),
+        };
     }
     let regexes = patterns
         .iter()
@@ -262,7 +399,9 @@ fn gen_string_value(rng: &mut ChaCha8Rng, specs: &[CheckSpec], row: usize) -> Po
     // candidate satisfies the whole set.
     for pattern in &patterns {
         if let Some(canned) = canned_match(pattern) {
-            if regexes.iter().all(|regex| regex.is_match(&canned)) {
+            if regexes.iter().all(|regex| regex.is_match(&canned))
+                && satisfies_string_constraints(&canned, &constraints)
+            {
                 return Ok(canned);
             }
         }
@@ -289,6 +428,40 @@ fn gen_int_series(
     specs: &[CheckSpec],
     n: usize,
 ) -> PolarsResult<Series> {
+    if let Some(allowed) = one_of_numeric_values(specs) {
+        if *dtype == DataType::UInt128 {
+            let candidates: Vec<u128> = allowed
+                .iter()
+                .filter_map(|&v| exact_u128_value(v))
+                .collect();
+            if candidates.is_empty() {
+                return Err(PolarsError::ComputeError(
+                    "Unsatisfiable one_of values for the UInt128 column in schema".into(),
+                ));
+            }
+            let values: Vec<u128> = (0..n)
+                .map(|_| candidates[rng.random_range(0..candidates.len())])
+                .collect();
+            return cast_to_dtype(Series::new(name.clone(), values), dtype);
+        }
+        // Sample in the integer domain so every value satisfies the bounds; membership
+        // is exact.
+        let (dmin, dmax, _) = int_domain_bounds(dtype)?;
+        let candidates: Vec<i128> = allowed
+            .iter()
+            .filter_map(|&v| exact_i128_value(v))
+            .filter(|v| *v >= dmin && *v <= dmax)
+            .collect();
+        if candidates.is_empty() {
+            return Err(PolarsError::ComputeError(
+                format!("Unsatisfiable one_of values for the {dtype} column in schema").into(),
+            ));
+        }
+        let values: Vec<i128> = (0..n)
+            .map(|_| candidates[rng.random_range(0..candidates.len())])
+            .collect();
+        return cast_to_dtype(Series::new(name.clone(), values), dtype);
+    }
     // Sample in the integer domain so every value satisfies the bounds
     // exactly; float sampling plus truncation can land outside them.
     let min_width = int_min_width(specs, n);
@@ -298,22 +471,24 @@ fn gen_int_series(
         let values: Vec<u128> = (0..n).map(|_| rng.random_range(lo..=hi)).collect();
         return cast_to_dtype(Series::new(name.clone(), values), dtype);
     }
-    let (dmin, dmax, fallback) = match dtype {
-        DataType::Int8 => (
-            i128::from(i8::MIN),
-            i128::from(i8::MAX),
-            (-100i128, 100i128),
-        ),
-        DataType::UInt8 => (0, i128::from(u8::MAX), (0, 200)),
-        DataType::UInt16 => (0, i128::from(u16::MAX), (0, 1000)),
-        DataType::UInt32 => (0, i128::from(u32::MAX), (0, 100_000)),
-        DataType::UInt64 => (0, i128::from(u64::MAX), (0, 1_000_000)),
-        DataType::Int128 => (i128::MIN, i128::MAX, (0, 1000)),
-        _ => (i128::from(i64::MIN), i128::from(i64::MAX), (0, 1000)),
-    };
+    let (dmin, dmax, fallback) = int_domain_bounds(dtype)?;
     let (lo, hi) = int_range_i128(specs, dmin, dmax, fallback, min_width)?;
     let values: Vec<i128> = (0..n).map(|_| rng.random_range(lo..=hi)).collect();
     cast_to_dtype(Series::new(name.clone(), values), dtype)
+}
+
+/// Domain bounds and default sampling window used by signed integer
+/// generation.
+fn int_domain_bounds(dtype: &DataType) -> PolarsResult<(i128, i128, (i128, i128))> {
+    match dtype {
+        DataType::Int8 => Ok((i128::from(i8::MIN), i128::from(i8::MAX), (-100, 100))),
+        DataType::UInt8 => Ok((0, i128::from(u8::MAX), (0, 200))),
+        DataType::UInt16 => Ok((0, i128::from(u16::MAX), (0, 1000))),
+        DataType::UInt32 => Ok((0, i128::from(u32::MAX), (0, 100_000))),
+        DataType::UInt64 => Ok((0, i128::from(u64::MAX), (0, 1_000_000))),
+        DataType::Int128 => Ok((i128::MIN, i128::MAX, (0, 1000))),
+        _ => Ok((i128::from(i64::MIN), i128::from(i64::MAX), (0, 1000))),
+    }
 }
 
 /// Inclusive integer sampling range from check bounds.
@@ -501,6 +676,18 @@ fn gen_float_series(
     specs: &[CheckSpec],
     n: usize,
 ) -> PolarsResult<Series> {
+    if let Some(allowed) = one_of_numeric_values(specs) {
+        if allowed.is_empty() {
+            return Err(PolarsError::ComputeError(
+                "Unsatisfiable one_of values for the column in schema".into(),
+            ));
+        }
+        let values: Vec<f64> = (0..n)
+            .map(|_| allowed[rng.random_range(0..allowed.len())])
+            .collect();
+        let float_series = Series::new(name.clone(), values);
+        return cast_to_dtype(float_series, dtype);
+    }
     let bounds = numeric_bounds(specs);
     let min_width = if has_unique(specs) { n as f64 } else { 0.0 };
     let values: Vec<f64> = (0..n)
@@ -517,6 +704,11 @@ fn gen_temporal_series(
     specs: &[CheckSpec],
     n: usize,
 ) -> PolarsResult<Series> {
+    if one_of_numeric_values(specs).is_some() {
+        return Err(PolarsError::ComputeError(
+            "Data generation does not support one_of on temporal columns".into(),
+        ));
+    }
     let (lo, hi) = int_range_i128(
         specs,
         i128::from(i64::MIN),
@@ -554,6 +746,23 @@ fn gen_scalar_series(
             gen_temporal_series(rng, name, dtype, specs, n)
         }
         DataType::Boolean => {
+            if let Some(allowed) = one_of_numeric_values(specs) {
+                let has_true = allowed.contains(&1.0);
+                let has_false = allowed.contains(&0.0);
+                if !has_true && !has_false {
+                    return Err(PolarsError::ComputeError(
+                        "Unsatisfiable one_of values for the Boolean column in schema".into(),
+                    ));
+                }
+                return match (has_true, has_false) {
+                    (true, false) => Ok(Series::new(name.clone(), vec![true; n])),
+                    (false, true) => Ok(Series::new(name.clone(), vec![false; n])),
+                    _ => Ok(Series::new(
+                        name.clone(),
+                        (0..n).map(|_| rng.random_bool(0.5)).collect::<Vec<bool>>(),
+                    )),
+                };
+            }
             let values: Vec<bool> = (0..n).map(|_| rng.random_bool(0.5)).collect();
             Ok(Series::new(name.clone(), values))
         }
@@ -798,6 +1007,7 @@ fn distinct_pattern_strings(
     if patterns.is_empty() {
         return Ok(None);
     }
+    let constraints = string_constraints(specs);
     let regexes = patterns
         .iter()
         .map(|pattern| {
@@ -809,7 +1019,10 @@ fn distinct_pattern_strings(
     let mut pool: Vec<String> = Vec::new();
     for pattern in &patterns {
         if let Some(canned) = canned_match(pattern) {
-            if regexes.iter().all(|regex| regex.is_match(&canned)) && seen.insert(canned.clone()) {
+            if regexes.iter().all(|regex| regex.is_match(&canned))
+                && satisfies_string_constraints(&canned, &constraints)
+                && seen.insert(canned.clone())
+            {
                 pool.push(canned);
             }
         }
@@ -826,6 +1039,7 @@ fn distinct_pattern_strings(
         let mutated = mutate_ascii_alnum(rng, &base);
         if mutated != base
             && regexes.iter().all(|regex| regex.is_match(&mutated))
+            && satisfies_string_constraints(&mutated, &constraints)
             && seen.insert(mutated.clone())
         {
             pool.push(mutated);
@@ -1423,7 +1637,7 @@ fn frame_to_dataframe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checks::{GreaterThanF64, ListLenBetween, OneOfString};
+    use crate::checks::{GreaterThanF64, ListLenBetween, OneOfString, StrLengthBetween};
     use crate::column::ColumnSpec;
     use crate::dataframe_checks::{ColumnComparison, CompareOp, UniqueTogether};
     use std::collections::HashSet as StdHashSet;
@@ -1745,5 +1959,171 @@ mod tests {
         );
         let frame = sample(&schema, 15, 19).unwrap();
         assert!(schema.validate(&frame).is_valid());
+    }
+
+    fn str_spec(name: &str, checks: Vec<Box<dyn crate::checks::Check>>) -> ColumnSpec {
+        ColumnSpec {
+            name: name.to_string(),
+            dtype: DataType::String,
+            nullable: false,
+            checks,
+        }
+    }
+
+    #[test]
+    fn samples_satisfy_string_constraints() {
+        use crate::checks::{NotBlank, StartsWith};
+        let schema = Schema::new(vec![str_spec(
+            "code",
+            vec![
+                Box::new(StrLengthBetween {
+                    min_len: 3,
+                    max_len: 20,
+                }),
+                Box::new(NotBlank),
+                Box::new(StartsWith {
+                    prefix: "t-".to_string(),
+                }),
+            ],
+        )]);
+        for seed in 0..5 {
+            let frame = sample(&schema, 20, seed).unwrap();
+            assert!(schema.validate(&frame).is_valid(), "seed {seed} failed");
+            let code = frame.column("code").unwrap().str().unwrap();
+            for value in code.iter().flatten() {
+                assert!(value.starts_with("t-"));
+                assert!(!value.trim().is_empty());
+                assert!((3..=20).contains(&value.chars().count()));
+            }
+        }
+    }
+
+    #[test]
+    fn samples_respect_ends_with() {
+        use crate::checks::EndsWith;
+        let schema = Schema::new(vec![str_spec(
+            "file",
+            vec![Box::new(EndsWith {
+                suffix: ".txt".to_string(),
+            })],
+        )]);
+        let frame = sample(&schema, 10, 2).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+        assert!(frame
+            .column("file")
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .flatten()
+            .all(|value| value.ends_with(".txt")));
+    }
+
+    #[test]
+    fn prefix_longer_than_max_length_is_unsatisfiable() {
+        use crate::checks::StartsWith;
+        let schema = Schema::new(vec![str_spec(
+            "code",
+            vec![
+                Box::new(StrLengthBetween {
+                    min_len: 0,
+                    max_len: 2,
+                }),
+                Box::new(StartsWith {
+                    prefix: "abc".to_string(),
+                }),
+            ],
+        )]);
+        assert!(sample(&schema, 5, 1).is_err());
+    }
+
+    #[test]
+    fn one_of_numeric_samples_allowed_integers_only() {
+        use crate::checks::OneOfNumericValues;
+        let schema = Schema::new(vec![int_spec(
+            "level",
+            vec![Box::new(OneOfNumericValues {
+                allowed_values: vec![3.0, 5.0],
+            })],
+        )]);
+        let frame = sample(&schema, 30, 8).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+        let level = frame.column("level").unwrap().i64().unwrap();
+        for value in level.iter().flatten() {
+            assert!(value == 3 || value == 5);
+        }
+    }
+
+    #[test]
+    fn one_of_numeric_filters_candidates_by_the_column_dtype() {
+        use crate::checks::OneOfNumericValues;
+        // 500 does not fit Int8, so only 3 can ever be sampled.
+        let schema = Schema::new(vec![ColumnSpec {
+            name: "small".to_string(),
+            dtype: DataType::Int8,
+            nullable: false,
+            checks: vec![Box::new(OneOfNumericValues {
+                allowed_values: vec![3.0, 500.0],
+            })],
+        }]);
+        let frame = sample(&schema, 20, 4).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+        assert!(frame
+            .column("small")
+            .unwrap()
+            .i8()
+            .unwrap()
+            .iter()
+            .flatten()
+            .all(|value| value == 3));
+    }
+
+    #[test]
+    fn one_of_numeric_fractional_value_on_int_column_errors() {
+        use crate::checks::OneOfNumericValues;
+        let schema = Schema::new(vec![int_spec(
+            "value",
+            vec![Box::new(OneOfNumericValues {
+                allowed_values: vec![0.5],
+            })],
+        )]);
+        assert!(sample(&schema, 5, 6).is_err());
+    }
+
+    #[test]
+    fn one_of_numeric_pins_boolean_columns() {
+        use crate::checks::OneOfNumericValues;
+        let schema = Schema::new(vec![ColumnSpec {
+            name: "flag".to_string(),
+            dtype: DataType::Boolean,
+            nullable: false,
+            checks: vec![Box::new(OneOfNumericValues {
+                allowed_values: vec![1.0],
+            })],
+        }]);
+        let frame = sample(&schema, 10, 1).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+        assert!(frame
+            .column("flag")
+            .unwrap()
+            .bool()
+            .unwrap()
+            .iter()
+            .flatten()
+            .all(|value| value));
+    }
+
+    #[test]
+    fn one_of_numeric_on_temporal_column_errors() {
+        use crate::checks::OneOfNumericValues;
+        let schema = Schema::new(vec![ColumnSpec {
+            name: "day".to_string(),
+            dtype: DataType::Date,
+            nullable: false,
+            checks: vec![Box::new(OneOfNumericValues {
+                allowed_values: vec![3.0, 5.0],
+            })],
+        }]);
+        assert!(sample(&schema, 5, 2).is_err());
     }
 }
