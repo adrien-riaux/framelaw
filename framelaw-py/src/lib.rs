@@ -1771,15 +1771,21 @@ impl PySchema {
         )
     }
 
-    #[pyo3(signature = (df, raise_on_error=None))]
+    #[pyo3(signature = (df, raise_on_error=None, chunk_rows=None))]
     fn validate(
         &self,
         py: Python<'_>,
         df: &Bound<'_, PyAny>,
         raise_on_error: Option<bool>,
+        chunk_rows: Option<u64>,
     ) -> PyResult<Option<PyValidationReport>> {
-        let raise = raise_on_error.unwrap_or(!self.lazy);
         let rust_schema = self.core_schema(py)?;
+
+        if let Some(chunk_rows) = chunk_rows {
+            return validate_chunked(py, df, &rust_schema, chunk_rows);
+        }
+
+        let raise = raise_on_error.unwrap_or(!self.lazy);
         let polars_df = materialize_frame(df)?;
         let report = rust_schema.validate(&polars_df);
 
@@ -1796,6 +1802,7 @@ impl PySchema {
             Ok(Some(PyValidationReport::from(report)))
         }
     }
+
 
     fn validate_lazy(
         &self,
@@ -1838,6 +1845,56 @@ impl PyColumnRef {
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(self.name.clone()))?;
         column.checks.push(check);
         Ok(())
+    }
+}
+
+/// Validates the frame in batches of `chunk_rows` rows. Each batch is
+/// re-validated with the GIL released, and error row indices are shifted
+/// back to absolute frame positions. Chunked validation always reports
+/// instead of raising; note that dataset-wide checks (unique, joint table
+/// checks) only see one chunk at a time.
+fn validate_chunked(
+    py: Python<'_>,
+    df: &Bound<'_, PyAny>,
+    rust_schema: &Schema,
+    chunk_rows: u64,
+) -> PyResult<Option<PyValidationReport>> {
+    if chunk_rows == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "chunk_rows must be at least 1",
+        ));
+    }
+    let mut errors: Vec<framelaw_core::errors::ValidationError> = Vec::new();
+    let mut offset: u64 = 0;
+    loop {
+        let sliced = df.call_method1("slice", (offset as isize, chunk_rows as isize))?;
+        let batch = if sliced.hasattr("collect")? {
+            sliced.call_method0("collect")?
+        } else {
+            sliced
+        };
+        let chunk = batch.extract::<PyDataFrame>()?;
+        let height = chunk.0.height() as u64;
+        if height == 0 {
+            break;
+        }
+        let chunk_report = py.detach(|| rust_schema.validate(&chunk.0));
+        for mut error in chunk_report.errors {
+            for row in &mut error.rows {
+                *row += offset as usize;
+            }
+            errors.push(error);
+        }
+        offset += height;
+        if height < chunk_rows {
+            break;
+        }
+    }
+    let report = framelaw_core::errors::ValidationReport { errors };
+    if report.is_valid() {
+        Ok(None)
+    } else {
+        Ok(Some(PyValidationReport::from(report)))
     }
 }
 

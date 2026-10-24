@@ -20,6 +20,12 @@ All notable changes to Framelaw are documented here. The format follows
   their tick unit (days for `Date`, the unit ticks for `Datetime`/
   `Duration`, nanoseconds for `Time`), and `sample` stays inside them.
 
+- `Schema.validate(data, chunk_rows=n)` validates large `DataFrame` or
+  `LazyFrame` inputs in batches: lazy slices and collect per batch, batch
+  validation with the GIL released, absolute row indices in reports, and
+  a never-raising report result (carry-over caveat: dataset-wide checks
+  such as `unique` only see one chunk at a time).
+
 - Nesting is no longer capped at one level: `List`, `Array`, and `Struct`
   generate at any depth (empty nested cells keep their dtype), and empty
   `List` cells no longer degrade the inferred inner dtype.

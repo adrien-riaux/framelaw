@@ -684,6 +684,29 @@ def test_validate_lazy_never_raises() -> None:
     assert not report.is_valid()
 
 
+def test_chunked_validation_reports_absolute_rows_and_never_raises() -> None:
+    """chunk_rows validates in batches with absolute row indices."""
+    dataframe = pl.DataFrame({"value": [1, 2, -1, 4, 5, 6, -2, 8]})  # rows 2, 6 fail
+    schema = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.gt(0)])})
+
+    # Default mode still raises.
+    with pytest.raises(ValueError):
+        schema.validate(dataframe)
+
+    # Chunked mode always reports, never raises.
+    report = schema.validate(dataframe, chunk_rows=3)
+    assert report is not None
+    assert not report.is_valid()
+    assert sorted(row for error in report.errors for row in error.rows) == [2, 6]
+
+    # Works for LazyFrame inputs too.
+    lazy_report = schema.validate(dataframe.lazy(), chunk_rows=3)
+    assert lazy_report is not None
+    assert sorted(row for error in lazy_report.errors for row in error.rows) == [2, 6]
+
+    assert schema.validate(pl.DataFrame({"value": [1, 2, 3]}), chunk_rows=2) is None
+
+
 def test_report_raise_if_invalid() -> None:
     """Reports can re-raise on demand."""
     schema = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.gt(0)])})
