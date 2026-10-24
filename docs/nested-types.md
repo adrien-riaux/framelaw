@@ -1,8 +1,8 @@
 # Nested types
 
 FrameLaw validates Polars nested columns — `List`, `Array`, and `Struct` —
-with structural dtype matching and dedicated checks. One nesting level is
-supported.
+with structural dtype matching and dedicated checks, nested to arbitrary
+depth.
 
 ## Dtype matching
 

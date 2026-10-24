@@ -20,6 +20,10 @@ All notable changes to Framelaw are documented here. The format follows
   their tick unit (days for `Date`, the unit ticks for `Datetime`/
   `Duration`, nanoseconds for `Time`), and `sample` stays inside them.
 
+- Nesting is no longer capped at one level: `List`, `Array`, and `Struct`
+  generate at any depth (empty nested cells keep their dtype), and empty
+  `List` cells no longer degrade the inferred inner dtype.
+
 ### Table checks
 
 - Five new cross-column checks validate whole rows across columns:

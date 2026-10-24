@@ -217,7 +217,10 @@ def test_infer_schema_temporal_bounds_and_sample() -> None:
 
     epoch = date(1970, 1, 1)
     dataframe = pl.DataFrame(
-        {"start": [epoch, epoch + timedelta(days=50)], "end": [epoch + timedelta(days=1), epoch + timedelta(days=60)]},
+        {
+            "start": [epoch, epoch + timedelta(days=50)],
+            "end": [epoch + timedelta(days=1), epoch + timedelta(days=60)],
+        },
         schema={"start": pl.Date, "end": pl.Date},
     )
 
@@ -803,6 +806,57 @@ def test_struct_names_with_separators_round_trip() -> None:
     assert schema.validate(valid) is None
     restored = fl.Schema.from_json(schema.to_json())
     assert restored.validate(valid) is None
+
+
+def test_deep_nesting_round_trip_and_sample() -> None:
+    """Deeply nested dtypes persist through JSON and sample() builds them."""
+    schema = fl.Schema(
+        {
+            "matrix": fl.Column(pl.List(pl.List(pl.Int64))),
+            "grid": fl.Column(pl.List(pl.Struct({"a": pl.Int64, "b": pl.String}))),
+            "addresses": fl.Column(
+                pl.Struct({"zip": pl.String, "codes": pl.List(pl.List(pl.Int64))}),
+                checks=[fl.struct_field("zip", [fl.matches(r"^\d{5}$")])],
+            ),
+        }
+    )
+    restored = fl.Schema.from_json(schema.to_json())
+    data = fl.sample(restored, 5, seed=5)
+    assert restored.validate(data) is None
+
+
+def test_struct_field_error_lists_full_field_path() -> None:
+    """Nested struct field checks compose the complete field path."""
+    schema = fl.Schema(
+        {
+            "l1": fl.Column(
+                pl.Struct(
+                    {"l2": pl.Struct({"x": pl.Int64, "inner": pl.Struct({"leaf": pl.String})})}
+                ),
+                checks=[
+                    fl.struct_field(
+                        "l2",
+                        [fl.struct_field("inner", [fl.struct_field("leaf", [fl.not_blank()])])],
+                    )
+                ],
+            )
+        }
+    )
+    dataframe = pl.DataFrame(
+        {
+            "l1": [
+                {"l2": {"x": 1, "inner": {"leaf": "ok"}}},
+                {"l2": {"x": 2, "inner": {"leaf": "   "}}},
+            ]
+        }
+    )
+    report = schema.validate(dataframe, raise_on_error=False)
+    blank_errors = [error for error in report.errors if error.check == "NotBlank"]
+    assert len(blank_errors) == 1
+    assert blank_errors[0].column == "l1"
+    assert blank_errors[0].rows == [1]
+    assert "Field 'l2'" in blank_errors[0].message
+    assert "Field 'inner'" in blank_errors[0].message
 
 
 def test_result_classes_are_importable() -> None:

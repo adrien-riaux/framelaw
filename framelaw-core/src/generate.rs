@@ -795,14 +795,6 @@ fn gen_list_series(
     specs: &[CheckSpec],
     n: usize,
 ) -> PolarsResult<Series> {
-    if matches!(
-        inner,
-        DataType::List(_) | DataType::Array(_, _) | DataType::Struct(_)
-    ) {
-        return Err(PolarsError::ComputeError(
-            "Data generation supports one nesting level only".into(),
-        ));
-    }
     let (min_len, max_len) = list_len_bounds(specs);
     if min_len > max_len {
         return Err(PolarsError::ComputeError(
@@ -823,7 +815,11 @@ fn gen_list_series(
         } else {
             rng.random_range(min_len..=max_len)
         };
-        let values = gen_scalar_series(rng, &PlSmallStr::from(""), inner, &[], len)?;
+        // Element checks (beyond length) are not part of a list spec, so
+        // inner cells are generated without checks; nested dtypes recurse
+        // through `gen_base_series`, which handles any depth.
+        let values = gen_base_series(rng, &PlSmallStr::from(""), inner, &[], len)?;
+        let values = cast_to_dtype(values, inner)?;
         inners.push(values);
     }
     Ok(Series::new(name.clone(), inners))
@@ -2271,6 +2267,42 @@ mod tests {
             })],
         }]);
         let frame = sample(&schema, 10, 3).unwrap();
+        assert!(schema.validate(&frame).is_valid());
+    }
+
+    #[test]
+    fn samples_deeply_nested_dtypes() {
+        use crate::checks::StrLengthBetween;
+        // List(List(Int64)) with an inner Array, and Struct containing a List.
+        let deep_list = ColumnSpec {
+            name: "matrix".to_string(),
+            dtype: DataType::List(Box::new(DataType::Array(Box::new(DataType::Int64), 2))),
+            nullable: false,
+            checks: vec![Box::new(ListLenBetween {
+                min_len: 1,
+                max_len: 2,
+            })],
+        };
+        let struct_with_list = ColumnSpec {
+            name: "addresses".to_string(),
+            dtype: DataType::Struct(vec![
+                Field::new("city".into(), DataType::String),
+                Field::new("codes".into(), DataType::List(Box::new(DataType::Int64))),
+            ]),
+            nullable: false,
+            checks: vec![],
+        };
+        let wide_value = ColumnSpec {
+            name: "wide".to_string(),
+            dtype: DataType::String,
+            nullable: false,
+            checks: vec![Box::new(StrLengthBetween {
+                min_len: 2,
+                max_len: 4,
+            })],
+        };
+        let schema = Schema::new(vec![deep_list, struct_with_list, wide_value]);
+        let frame = sample(&schema, 8, 11).unwrap();
         assert!(schema.validate(&frame).is_valid());
     }
 

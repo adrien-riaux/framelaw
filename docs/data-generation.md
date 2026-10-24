@@ -40,7 +40,10 @@ assert schema.validate(frame) is None
 
 ## Limits
 
-- One nesting level; full regex synthesis is out of scope (patterns without
+- Elements inside nested containers are generated without element-level
+  checks (`list_len_between` still applies); struct fields keep their
+  `struct_field` checks.
+- Full regex synthesis is out of scope (patterns without
   a known canned value raise a cannot-synthesize error).
 - Contradictory schemas (e.g. `gt(10)` combined with `lt(0)`, or an
   unsatisfiable `unique`) raise `ValueError` instead of returning data.
