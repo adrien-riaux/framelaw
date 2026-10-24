@@ -1,4 +1,4 @@
-"""Framelaw v0.3 example: lazy validation mode and data generation."""
+"""Framelaw example: lazy validation mode and data generation."""
 
 import polars as pl
 from framelaw import Column, Schema, gt, list_len_between, lt_column, one_of, sample
