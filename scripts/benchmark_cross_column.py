@@ -1,7 +1,7 @@
 """Benchmark the cross-column table checks (use a release build for numbers)."""
 
-from datetime import timedelta
 import time
+from datetime import timedelta
 
 import polars as pl
 from framelaw import (

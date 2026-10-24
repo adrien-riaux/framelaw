@@ -3,7 +3,7 @@
 All notable changes to Framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.2.0] — 2026-10-25
 
 ### Python API
 
@@ -15,20 +15,11 @@ All notable changes to Framelaw are documented here. The format follows
 - `framelaw.one_of(values)` / `framelaw.is_in(values)` now accept numeric and
   boolean membership in addition to strings; integer rows are compared
   exactly beyond the 2^53 float range.
-
-- `infer_schema` now emits observed min/max bounds for temporal columns in
-  their tick unit (days for `Date`, the unit ticks for `Datetime`/
-  `Duration`, nanoseconds for `Time`), and `sample` stays inside them.
-
 - `Schema.validate(data, chunk_rows=n)` validates large `DataFrame` or
   `LazyFrame` inputs in batches: lazy slices and collect per batch, batch
   validation with the GIL released, absolute row indices in reports, and
   a never-raising report result (carry-over caveat: dataset-wide checks
   such as `unique` only see one chunk at a time).
-
-- Nesting is no longer capped at one level: `List`, `Array`, and `Struct`
-  generate at any depth (empty nested cells keep their dtype), and empty
-  `List` cells no longer degrade the inferred inner dtype.
 
 ### Table checks
 
@@ -43,11 +34,20 @@ All notable changes to Framelaw are documented here. The format follows
 - All five persist through JSON schema round-trips, and `sample` generates
   data satisfying them (unsatisfiable schemas error honestly).
 
+### Inference
+
+- `infer_schema` now emits observed min/max bounds for temporal columns in
+  their tick unit (days for `Date`, the unit ticks for `Datetime`/
+  `Duration`, nanoseconds for `Time`), and `sample` stays inside them.
+
 ### Data generation
 
 - `sample` honors all new checks, including string constraints and numeric
   membership, and reports unsatisfiable combinations (e.g. a fractional
   `one_of` on an integer column, a temporal `one_of`) as errors.
+- Nesting is no longer capped at one level: `List`, `Array`, and `Struct`
+  generate at any depth (empty nested cells keep their dtype), and empty
+  `List` cells no longer degrade the inferred inner dtype.
 
 ## [0.1.1]
 
