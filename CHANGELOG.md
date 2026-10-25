@@ -3,6 +3,18 @@
 All notable changes to Framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.1] — 2026-10-25
+
+### Documentation
+
+- Fixed the documentation site build and GitHub Pages deployment, including
+  the requirements path and navigation keys.
+- Corrected asset paths for the logo and favicon, and fixed emoji rendering
+  in the navigation.
+- Removed the duplicated changelog and license pages in favour of the
+  repository-level files.
+- Fixed typos across the guides, README, docstrings, and example scripts.
+
 ## [0.3.0] — 2026-10-25
 
 ### Python API
