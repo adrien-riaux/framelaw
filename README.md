@@ -1,15 +1,15 @@
-# FrameLaw
+# Framelaw
 
 **The law your DataFrames must obey.** Native Rust schema contracts, built for
 Polars, exposed to Python.
 
 [![PyPI](https://img.shields.io/pypi/v/framelaw.svg)](https://pypi.org/project/framelaw/)
 [![Python versions](https://img.shields.io/pypi/pyversions/framelaw.svg)](https://pypi.org/project/framelaw/)
-[![CI](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml)
+[![CI](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-live-blue)](https://adrien-riaux.github.io/framelaw/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/adrien-riaux/framelaw/blob/main/LICENSE)
 
-FrameLaw validates Polars `DataFrame`s against a schema — column types,
+Framelaw validates Polars `DataFrame`s against a schema — column types,
 nullability, value constraints, and cross-column rules — in parallel Rust,
 behind a Pandera-like Python API. On a 2M-row mixed workload it validates at
 ≈30M rows/s (Apple Silicon; reproduce with `scripts/benchmark.py` on a
@@ -34,7 +34,7 @@ behind a Pandera-like Python API. On a 2M-row mixed workload it validates at
 uv add framelaw
 ```
 
-FrameLaw is published on PyPI and ships prebuilt wheels for the native Rust
+Framelaw is published on PyPI and ships prebuilt wheels for the native Rust
 extension, so no Rust toolchain is needed. It requires Python 3.10+ and pulls
 in its Python dependencies (`polars>=1.0`, `pydantic>=2`) automatically.
 
@@ -76,7 +76,7 @@ Column 'country': rows [2], check 'OneOfString': Values in 'country' are not par
 ## Documentation
 
 Full documentation is published at
-**[adrien-riaux.github.io/framelaw](https://adrien-riaux.github.io/framelaw/)**.
+**[github.io/framelaw](https://adrien-riaux.github.io/framelaw/)**.
 It covers the quickstart, schemas, every check, cross-column and nested
 validation, error reports, inference, lazy mode, data generation, Pydantic and
 Polars integration, serialization, and the generated API reference.
