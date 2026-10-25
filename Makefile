@@ -65,11 +65,11 @@ scripts:
 
 docs-serve:
 	@echo "=> Serving documentation at http://127.0.0.1:8000..."
-	uvx --with-requirements docs/requirements.txt mkdocs serve
+	uvx --with-requirements docs/assets/requirements.txt mkdocs serve
 
 docs-build:
 	@echo "=> Building documentation (strict)..."
-	uvx --with-requirements docs/requirements.txt mkdocs build --strict
+	uvx --with-requirements docs/assets/requirements.txt mkdocs build --strict
 
 docs-check: docs-build
 	@echo "=> Executing runnable documentation snippets..."
