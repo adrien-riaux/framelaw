@@ -17,7 +17,7 @@ def test_validation_returns_report_with_rows() -> None:
     """Return structured failures when raising is disabled."""
     schema = fl.Schema(
         {
-            "age": fl.Column(pl.Int64, nullable=False, checks=[fl.gt(0)]),
+            "age": fl.Column(pl.Int64, nullable=False, checks=[fl.checks.column.gt(0)]),
             "name": fl.Column(pl.String, nullable=False),
         }
     )
@@ -38,9 +38,12 @@ def test_aliases_and_valid_data() -> None:
         {
             "country": fl.Column(
                 pl.String,
-                checks=[fl.one_of(["FR", "US"]), fl.matches(r"^[A-Z]{2}$")],
+                checks=[
+                    fl.checks.column.one_of(["FR", "US"]),
+                    fl.checks.column.matches(r"^[A-Z]{2}$"),
+                ],
             ),
-            "id": fl.Column(pl.Int64, checks=[fl.unique()]),
+            "id": fl.Column(pl.Int64, checks=[fl.checks.column.unique()]),
         }
     )
     dataframe = pl.DataFrame({"country": ["FR", "US"], "id": [1, 2]})
@@ -51,7 +54,7 @@ def test_aliases_and_valid_data() -> None:
 def test_invalid_regex_is_a_python_error() -> None:
     """Reject malformed regexes during check construction."""
     with pytest.raises(ValueError, match="Invalid regular expression"):
-        fl.matches("[")
+        fl.checks.column.matches("[")
 
 
 def test_string_checks_report_expected_rows() -> None:
@@ -61,11 +64,11 @@ def test_string_checks_report_expected_rows() -> None:
             "code": fl.Column(
                 pl.String,
                 checks=[
-                    fl.str_length_between(2, 5),
-                    fl.not_blank(),
-                    fl.starts_with("AB"),
-                    fl.ends_with("-1"),
-                    fl.is_in(["AB-1", "AB2-1"]),
+                    fl.checks.column.str_length_between(2, 5),
+                    fl.checks.column.not_blank(),
+                    fl.checks.column.starts_with("AB"),
+                    fl.checks.column.ends_with("-1"),
+                    fl.checks.column.is_in(["AB-1", "AB2-1"]),
                 ],
             ),
         }
@@ -88,9 +91,9 @@ def test_numeric_and_boolean_one_of_membership() -> None:
     """Generalize one_of membership to numbers and booleans."""
     schema = fl.Schema(
         {
-            "level": fl.Column(pl.Int64, checks=[fl.is_in([2, 4, 6])]),
-            "score": fl.Column(pl.Float64, checks=[fl.is_in([0.5, 1.5])]),
-            "flag": fl.Column(pl.Boolean, checks=[fl.is_in([True])]),
+            "level": fl.Column(pl.Int64, checks=[fl.checks.column.is_in([2, 4, 6])]),
+            "score": fl.Column(pl.Float64, checks=[fl.checks.column.is_in([0.5, 1.5])]),
+            "flag": fl.Column(pl.Boolean, checks=[fl.checks.column.is_in([True])]),
         }
     )
     valid = pl.DataFrame({"level": [2, 4, 6], "score": [1.5, 0.5, 1.5], "flag": [True, True, True]})
@@ -108,13 +111,13 @@ def test_numeric_and_boolean_one_of_membership() -> None:
 def test_one_of_rejects_empty_and_mixed_lists() -> None:
     """Guard the generalized is_in constructor against bad inputs."""
     with pytest.raises(ValueError, match="empty"):
-        fl.is_in([])
+        fl.checks.column.is_in([])
     with pytest.raises(ValueError, match="only strings or only numbers"):
-        fl.is_in(["a", 1])
+        fl.checks.column.is_in(["a", 1])
     with pytest.raises(ValueError, match="strings, numbers, or booleans"):
-        fl.is_in([object()])
+        fl.checks.column.is_in([object()])
     with pytest.raises(ValueError, match="min_len must be <= max_len"):
-        fl.str_length_between(5, 2)
+        fl.checks.column.str_length_between(5, 2)
 
 
 def test_new_string_checks_json_round_trip() -> None:
@@ -123,10 +126,13 @@ def test_new_string_checks_json_round_trip() -> None:
         {
             "code": fl.Column(
                 pl.String,
-                checks=[fl.str_length_between(2, 4), fl.not_blank()],
+                checks=[fl.checks.column.str_length_between(2, 4), fl.checks.column.not_blank()],
             ),
-            "file": fl.Column(pl.String, checks=[fl.starts_with("data."), fl.ends_with(".csv")]),
-            "level": fl.Column(pl.Int64, checks=[fl.is_in([1, 3])]),
+            "file": fl.Column(
+                pl.String,
+                checks=[fl.checks.column.starts_with("data."), fl.checks.column.ends_with(".csv")],
+            ),
+            "level": fl.Column(pl.Int64, checks=[fl.checks.column.is_in([1, 3])]),
         }
     )
     payload = schema.to_json()
@@ -161,9 +167,13 @@ def test_new_string_checks_generation() -> None:
         {
             "code": fl.Column(
                 pl.String,
-                checks=[fl.str_length_between(3, 8), fl.starts_with("x-"), fl.not_blank()],
+                checks=[
+                    fl.checks.column.str_length_between(3, 8),
+                    fl.checks.column.starts_with("x-"),
+                    fl.checks.column.not_blank(),
+                ],
             ),
-            "level": fl.Column(pl.Int64, checks=[fl.is_in([1, 2])]),
+            "level": fl.Column(pl.Int64, checks=[fl.checks.column.is_in([1, 2])]),
         }
     )
     frame = fl.sample(schema, n=10, seed=7)
@@ -193,7 +203,7 @@ def test_infer_schema_and_refine_column() -> None:
     )
 
     schema = fl.infer_schema(dataframe)
-    schema["age"].add_check(fl.lt(100))
+    schema["age"].add_check(fl.checks.column.lt(100))
 
     assert schema.validate(dataframe) is None
     with pytest.raises(KeyError):
@@ -250,7 +260,9 @@ def test_lazyframe_and_polars_schema_validation() -> None:
 
 def test_report_to_dataframe_expands_failing_rows() -> None:
     """Represent each failing row as one native Polars report row."""
-    schema = fl.Schema({"value": fl.Column(pl.Int64, nullable=False, checks=[fl.gt(0)])})
+    schema = fl.Schema(
+        {"value": fl.Column(pl.Int64, nullable=False, checks=[fl.checks.column.gt(0)])}
+    )
     dataframe = pl.DataFrame({"value": [1, -2, 0]})
 
     report = schema.validate(dataframe, raise_on_error=False)
@@ -324,18 +336,21 @@ def test_schema_json_round_trip_preserves_validation() -> None:
                 pl.Int64,
                 nullable=False,
                 checks=[
-                    fl.not_null(),
-                    fl.unique(),
-                    fl.gt(0),
-                    fl.lt(100),
-                    fl.gte(1),
-                    fl.lte(99),
-                    fl.between(1, 99),
+                    fl.checks.column.not_null(),
+                    fl.checks.column.unique(),
+                    fl.checks.column.gt(0),
+                    fl.checks.column.lt(100),
+                    fl.checks.column.gte(1),
+                    fl.checks.column.lte(99),
+                    fl.checks.column.between(1, 99),
                 ],
             ),
             "country": fl.Column(
                 pl.String,
-                checks=[fl.matches(r"^[A-Z]{2}$"), fl.one_of(["FR", "US"])],
+                checks=[
+                    fl.checks.column.matches(r"^[A-Z]{2}$"),
+                    fl.checks.column.one_of(["FR", "US"]),
+                ],
             ),
         }
     )
@@ -372,7 +387,7 @@ def test_temporal_dtypes_validate_and_round_trip() -> None:
     """Validate Date/Datetime columns and persist their temporal dtype tags."""
     schema = fl.Schema(
         {
-            "day": fl.Column(pl.Date, checks=[fl.gt(0)]),
+            "day": fl.Column(pl.Date, checks=[fl.checks.column.gt(0)]),
             "instant": fl.Column(pl.Datetime("us")),
         }
     )
@@ -395,7 +410,7 @@ def test_cross_column_comparison_reports_rows() -> None:
             "start": fl.Column(pl.Int64),
             "end": fl.Column(pl.Int64),
         },
-        dataframe_checks=[fl.lt_column("start", "end")],
+        dataframe_checks=[fl.checks.table.lt_column("start", "end")],
     )
     valid = pl.DataFrame({"start": [1, 2], "end": [2, 3]})
     assert schema.validate(valid) is None
@@ -415,7 +430,7 @@ def test_unique_together_reports_duplicates() -> None:
             "a": fl.Column(pl.String),
             "b": fl.Column(pl.Int64),
         },
-        dataframe_checks=[fl.unique_together(["a", "b"])],
+        dataframe_checks=[fl.checks.table.unique_together(["a", "b"])],
     )
     dataframe = pl.DataFrame({"a": ["x", "x", "y"], "b": [1, 1, 2]})
     report = schema.validate(dataframe, raise_on_error=False)
@@ -427,7 +442,7 @@ def test_cross_column_json_round_trip() -> None:
     """Persist table checks alongside column checks."""
     schema = fl.Schema(
         {"start": fl.Column(pl.Int64), "end": fl.Column(pl.Int64)},
-        dataframe_checks=[fl.lt_column("start", "end")],
+        dataframe_checks=[fl.checks.table.lt_column("start", "end")],
     )
     restored = fl.Schema.from_json(schema.to_json())
     assert restored.validate(pl.DataFrame({"start": [1], "end": [2]})) is None
@@ -439,7 +454,7 @@ def test_ordered_chain_reports_rows() -> None:
     """Validate the per-row chain `a <= b <= c` (and strict mode)."""
     schema = fl.Schema(
         {"a": fl.Column(pl.Int64), "b": fl.Column(pl.Int64), "c": fl.Column(pl.Int64)},
-        dataframe_checks=[fl.ordered(["a", "b", "c"], strict=False)],
+        dataframe_checks=[fl.checks.table.ordered(["a", "b", "c"], strict=False)],
     )
     report = schema.validate(
         pl.DataFrame({"a": [1, 9, 2], "b": [2, 2, 4], "c": [3, 5, 7]}), raise_on_error=False
@@ -449,7 +464,7 @@ def test_ordered_chain_reports_rows() -> None:
 
     strict = fl.Schema(
         {"a": fl.Column(pl.Int64), "b": fl.Column(pl.Int64), "c": fl.Column(pl.Int64)},
-        dataframe_checks=[fl.ordered(["a", "b", "c"], strict=True)],
+        dataframe_checks=[fl.checks.table.ordered(["a", "b", "c"], strict=True)],
     )
     report = strict.validate(
         pl.DataFrame({"a": [1, 2, 2], "b": [2, 2, 3], "c": [3, 3, 4]}), raise_on_error=False
@@ -462,7 +477,7 @@ def test_sum_columns_reports_mismatched_rows() -> None:
     """Check `target == sum(addends)` exactly for ints, tolerantly for floats."""
     int_schema = fl.Schema(
         {"a": fl.Column(pl.Int64), "b": fl.Column(pl.Int64), "c": fl.Column(pl.Int64)},
-        dataframe_checks=[fl.sum_columns(["a", "b"], "c")],
+        dataframe_checks=[fl.checks.table.sum_columns(["a", "b"], "c")],
     )
     report = int_schema.validate(
         pl.DataFrame({"a": [1, 2], "b": [2, 3], "c": [3, 9]}), raise_on_error=False
@@ -472,7 +487,7 @@ def test_sum_columns_reports_mismatched_rows() -> None:
 
     float_schema = fl.Schema(
         {"a": fl.Column(pl.Float64), "b": fl.Column(pl.Float64), "c": fl.Column(pl.Float64)},
-        dataframe_checks=[fl.sum_columns(["a", "b"], "c", tolerance=1e-9)],
+        dataframe_checks=[fl.checks.table.sum_columns(["a", "b"], "c", tolerance=1e-9)],
     )
     assert float_schema.validate(pl.DataFrame({"a": [0.1], "b": [0.2], "c": [0.3]})) is None
     report = float_schema.validate(
@@ -486,7 +501,7 @@ def test_implies_reports_missing_values() -> None:
     """Non-null left values require a present `by` value."""
     schema = fl.Schema(
         {"left": fl.Column(pl.Int64), "by": fl.Column(pl.String)},
-        dataframe_checks=[fl.implies("left", "by")],
+        dataframe_checks=[fl.checks.table.implies("left", "by")],
     )
     report = schema.validate(
         pl.DataFrame({"left": [1, None, 3], "by": ["x", None, None]}), raise_on_error=False
@@ -500,7 +515,7 @@ def test_determines_reports_conflicting_groups() -> None:
     """Every `a` value must map to a single `b` value."""
     schema = fl.Schema(
         {"a": fl.Column(pl.String), "b": fl.Column(pl.Int64)},
-        dataframe_checks=[fl.determines("a", "b")],
+        dataframe_checks=[fl.checks.table.determines("a", "b")],
     )
     report = schema.validate(
         pl.DataFrame({"a": ["x", "x", "y"], "b": [1, 2, 3]}), raise_on_error=False
@@ -517,7 +532,7 @@ def test_within_temporal_gap() -> None:
             "start": fl.Column(pl.Date),
             "end": fl.Column(pl.Date),
         },
-        dataframe_checks=[fl.within("start", "end", timedelta(days=3))],
+        dataframe_checks=[fl.checks.table.within("start", "end", timedelta(days=3))],
     )
     epoch = date(1970, 1, 1)
     assert (
@@ -542,11 +557,11 @@ def test_new_table_checks_json_round_trip() -> None:
             "free": fl.Column(pl.String),
         },
         dataframe_checks=[
-            fl.ordered(["a", "b"], strict=False),
-            fl.sum_columns(["a", "a"], "b"),
-            fl.implies("a", "free"),
-            fl.determines("a", "free"),
-            fl.within("start", "end", timedelta(days=2)),
+            fl.checks.table.ordered(["a", "b"], strict=False),
+            fl.checks.table.sum_columns(["a", "a"], "b"),
+            fl.checks.table.implies("a", "free"),
+            fl.checks.table.determines("a", "free"),
+            fl.checks.table.within("start", "end", timedelta(days=2)),
         ],
     )
     restored = fl.Schema.from_json(schema.to_json())
@@ -583,7 +598,7 @@ def test_new_table_checks_generation() -> None:
     """sample() produces frames satisfying the new cross-column checks."""
     schema = fl.Schema(
         {
-            "a": fl.Column(pl.Int64, checks=[fl.gt(0)]),
+            "a": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)]),
             "b": fl.Column(pl.Int64),
             "start": fl.Column(pl.Date),
             "end": fl.Column(pl.Date),
@@ -593,11 +608,11 @@ def test_new_table_checks_generation() -> None:
             "code": fl.Column(pl.Int64),
         },
         dataframe_checks=[
-            fl.ordered(["a", "b"], strict=False),
-            fl.sum_columns(["a", "a"], "b"),
-            fl.implies("left", "by"),
-            fl.determines("dup", "code"),
-            fl.within("start", "end", timedelta(days=30)),
+            fl.checks.table.ordered(["a", "b"], strict=False),
+            fl.checks.table.sum_columns(["a", "a"], "b"),
+            fl.checks.table.implies("left", "by"),
+            fl.checks.table.determines("dup", "code"),
+            fl.checks.table.within("start", "end", timedelta(days=30)),
         ],
     )
     data = fl.sample(schema, 25, seed=7)
@@ -610,7 +625,7 @@ def test_nested_list_checks_and_json() -> None:
         {
             "tags": fl.Column(
                 pl.List(pl.Int64),
-                checks=[fl.list_len_between(1, 2), fl.list_not_empty()],
+                checks=[fl.checks.column.list_len_between(1, 2), fl.checks.column.list_not_empty()],
             )
         }
     )
@@ -631,7 +646,9 @@ def test_struct_field_checks() -> None:
         {
             "address": fl.Column(
                 pl.Struct({"city": pl.String, "zip": pl.String}),
-                checks=[fl.struct_field("zip", [fl.matches(r"^\d{5}$")])],
+                checks=[
+                    fl.checks.column.struct_field("zip", [fl.checks.column.matches(r"^\d{5}$")])
+                ],
             )
         }
     )
@@ -656,7 +673,7 @@ def test_infer_schema_list_lengths() -> None:
 def test_lazy_flag_changes_validate_default() -> None:
     """A lazy schema returns reports instead of raising by default."""
     schema = fl.Schema(
-        {"value": fl.Column(pl.Int64, checks=[fl.gt(0)])},
+        {"value": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)])},
         lazy=True,
     )
     assert schema.lazy is True
@@ -669,7 +686,7 @@ def test_lazy_flag_changes_validate_default() -> None:
     with pytest.raises(ValueError, match="Validation failed"):
         schema.validate(invalid, raise_on_error=True)
 
-    eager = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.gt(0)])})
+    eager = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)])})
     assert eager.lazy is False
     with pytest.raises(ValueError, match="Validation failed"):
         eager.validate(invalid)
@@ -677,7 +694,7 @@ def test_lazy_flag_changes_validate_default() -> None:
 
 def test_validate_lazy_never_raises() -> None:
     """validate_lazy always returns a report object."""
-    schema = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.gt(0)])})
+    schema = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)])})
     assert schema.validate_lazy(pl.DataFrame({"value": [1]})) is None
     report = schema.validate_lazy(pl.DataFrame({"value": [-1]}))
     assert report is not None
@@ -687,7 +704,7 @@ def test_validate_lazy_never_raises() -> None:
 def test_chunked_validation_reports_absolute_rows_and_never_raises() -> None:
     """chunk_rows validates in batches with absolute row indices."""
     dataframe = pl.DataFrame({"value": [1, 2, -1, 4, 5, 6, -2, 8]})  # rows 2, 6 fail
-    schema = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.gt(0)])})
+    schema = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)])})
 
     # Default mode still raises.
     with pytest.raises(ValueError):
@@ -709,7 +726,7 @@ def test_chunked_validation_reports_absolute_rows_and_never_raises() -> None:
 
 def test_report_raise_if_invalid() -> None:
     """Reports can re-raise on demand."""
-    schema = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.gt(0)])})
+    schema = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)])})
     valid_report = schema.validate_lazy(pl.DataFrame({"value": [1]}))
     assert valid_report is None
     report = schema.validate(pl.DataFrame({"value": [-1]}), raise_on_error=False)
@@ -719,7 +736,7 @@ def test_report_raise_if_invalid() -> None:
 
 def test_lazy_json_round_trip() -> None:
     """The lazy flag survives JSON persistence."""
-    schema = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.gt(0)])}, lazy=True)
+    schema = fl.Schema({"value": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)])}, lazy=True)
     restored = fl.Schema.from_json(schema.to_json())
     assert restored.lazy is True
     assert restored.validate(pl.DataFrame({"value": [-1]})) is not None
@@ -729,13 +746,15 @@ def test_sample_generates_valid_data() -> None:
     """Sampled frames satisfy scalar, table, and nested checks."""
     schema = fl.Schema(
         {
-            "age": fl.Column(pl.Int64, nullable=False, checks=[fl.gt(0), fl.lt(120)]),
-            "country": fl.Column(pl.String, checks=[fl.one_of(["FR", "US"])]),
+            "age": fl.Column(
+                pl.Int64, nullable=False, checks=[fl.checks.column.gt(0), fl.checks.column.lt(120)]
+            ),
+            "country": fl.Column(pl.String, checks=[fl.checks.column.one_of(["FR", "US"])]),
             "start": fl.Column(pl.Int64),
             "end": fl.Column(pl.Int64),
-            "tags": fl.Column(pl.List(pl.Int64), checks=[fl.list_len_between(1, 2)]),
+            "tags": fl.Column(pl.List(pl.Int64), checks=[fl.checks.column.list_len_between(1, 2)]),
         },
-        dataframe_checks=[fl.lt_column("start", "end")],
+        dataframe_checks=[fl.checks.table.lt_column("start", "end")],
     )
     frame = schema.sample(20, seed=42)
     assert frame.height == 20
@@ -752,7 +771,7 @@ def test_sample_generates_valid_data() -> None:
 def test_sample_unsatisfiable_raises() -> None:
     """Contradictory bounds surface as Python errors."""
     schema = fl.Schema(
-        {"value": fl.Column(pl.Int64, checks=[fl.gt(10), fl.lt(0)])},
+        {"value": fl.Column(pl.Int64, checks=[fl.checks.column.gt(10), fl.checks.column.lt(0)])},
     )
     with pytest.raises(ValueError, match="[Uu]nsatisfiable"):
         schema.sample(5, seed=1)
@@ -761,7 +780,9 @@ def test_sample_unsatisfiable_raises() -> None:
 def test_wide_integers_compare_exactly() -> None:
     """Values above 2**53 keep their distinctness in numeric checks."""
     two_to_53 = 2**53
-    schema = fl.Schema({"value": fl.Column(pl.UInt64, checks=[fl.gt(float(two_to_53))])})
+    schema = fl.Schema(
+        {"value": fl.Column(pl.UInt64, checks=[fl.checks.column.gt(float(two_to_53))])}
+    )
     dataframe = pl.DataFrame({"value": [two_to_53, two_to_53 + 1]}, schema={"value": pl.UInt64})
     report = schema.validate(dataframe, raise_on_error=False)
     assert not report.is_valid()
@@ -770,7 +791,7 @@ def test_wide_integers_compare_exactly() -> None:
 
 def test_explicit_not_null_fails_on_all_null_column() -> None:
     """An explicit not_null() still fires on an all-null column."""
-    schema = fl.Schema({"value": fl.Column(pl.Null, checks=[fl.not_null()])})
+    schema = fl.Schema({"value": fl.Column(pl.Null, checks=[fl.checks.column.not_null()])})
     dataframe = pl.DataFrame({"value": [None, None]}, schema={"value": pl.Null})
     report = schema.validate(dataframe, raise_on_error=False)
     assert not report.is_valid()
@@ -795,7 +816,9 @@ def test_nested_dtype_json_round_trip() -> None:
             "items": fl.Column(pl.List(pl.Struct({"n": pl.Int64}))),
             "address": fl.Column(
                 pl.Struct({"zip": pl.String, "codes": pl.List(pl.Int64)}),
-                checks=[fl.struct_field("zip", [fl.matches(r"^\d{5}$")])],
+                checks=[
+                    fl.checks.column.struct_field("zip", [fl.checks.column.matches(r"^\d{5}$")])
+                ],
             ),
             "nested": fl.Column(pl.Struct({"outer": pl.Struct({"a": pl.Int64})})),
             "deep": fl.Column(pl.Struct({"outer": pl.Struct({"a": pl.Int64, "b": pl.String})})),
@@ -839,7 +862,9 @@ def test_deep_nesting_round_trip_and_sample() -> None:
             "grid": fl.Column(pl.List(pl.Struct({"a": pl.Int64, "b": pl.String}))),
             "addresses": fl.Column(
                 pl.Struct({"zip": pl.String, "codes": pl.List(pl.List(pl.Int64))}),
-                checks=[fl.struct_field("zip", [fl.matches(r"^\d{5}$")])],
+                checks=[
+                    fl.checks.column.struct_field("zip", [fl.checks.column.matches(r"^\d{5}$")])
+                ],
             ),
         }
     )
@@ -857,9 +882,18 @@ def test_struct_field_error_lists_full_field_path() -> None:
                     {"l2": pl.Struct({"x": pl.Int64, "inner": pl.Struct({"leaf": pl.String})})}
                 ),
                 checks=[
-                    fl.struct_field(
+                    fl.checks.column.struct_field(
                         "l2",
-                        [fl.struct_field("inner", [fl.struct_field("leaf", [fl.not_blank()])])],
+                        [
+                            fl.checks.column.struct_field(
+                                "inner",
+                                [
+                                    fl.checks.column.struct_field(
+                                        "leaf", [fl.checks.column.not_blank()]
+                                    )
+                                ],
+                            )
+                        ],
                     )
                 ],
             )
@@ -889,3 +923,21 @@ def test_result_classes_are_importable() -> None:
     assert "ValidationError" in fl.__all__
     assert "ValidationReport" in fl.__all__
     assert ValidationError is not None and ValidationReport is not None
+
+
+def test_check_constructors_live_in_scoped_namespaces() -> None:
+    """Single-column and table checks are grouped under framelaw.checks."""
+    assert "checks" in fl.__all__
+    assert isinstance(fl.checks.column.gt(0), fl.Check)
+    assert isinstance(fl.checks.table.eq_columns("a", "b"), fl.DataFrameCheck)
+
+
+def test_top_level_check_aliases_emit_deprecation_warning() -> None:
+    """Legacy top-level names keep working but point at the new namespace."""
+    with pytest.warns(DeprecationWarning, match="checks.column.gt"):
+        column_check = fl.gt(0)
+    assert isinstance(column_check, fl.Check)
+
+    with pytest.warns(DeprecationWarning, match="checks.table.lt_column"):
+        table_check = fl.lt_column("start", "end")
+    assert isinstance(table_check, fl.DataFrameCheck)
