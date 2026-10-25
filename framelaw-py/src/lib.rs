@@ -1803,7 +1803,6 @@ impl PySchema {
         }
     }
 
-
     fn validate_lazy(
         &self,
         py: Python<'_>,

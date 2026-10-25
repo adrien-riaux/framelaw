@@ -49,7 +49,7 @@ All notable changes to Framelaw are documented here. The format follows
   generate at any depth (empty nested cells keep their dtype), and empty
   `List` cells no longer degrade the inferred inner dtype.
 
-## [0.1.1]
+## [0.1.1] - 2026-10-23
 
 ### Python API
 
@@ -64,7 +64,7 @@ All notable changes to Framelaw are documented here. The format follows
   wheel per platform supports CPython 3.10 and newer, replacing the
   per-interpreter wheels.
 
-## [0.1.0] — First release
+## [0.1.0] — 2026-10-23
 
 Polars-native DataFrame validation in Rust, exposed to Python via PyO3.
 Validation runs directly on Polars' columnar memory with Rayon parallelism
