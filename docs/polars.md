@@ -1,6 +1,6 @@
 # Polars integration
 
-FrameLaw is Polars-native: validation runs on Polars' columnar memory with no
+Framelaw is Polars-native: validation runs on Polars' columnar memory with no
 conversion step, and every supported native dtype can appear in a schema.
 
 ## DataFrames and LazyFrames

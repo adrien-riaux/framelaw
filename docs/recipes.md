@@ -1,6 +1,6 @@
 # Recipes
 
-Short, runnable patterns for common FrameLaw workflows. The examples share
+Short, runnable patterns for common Framelaw workflows. The examples share
 this setup:
 
 ```python

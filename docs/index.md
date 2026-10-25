@@ -1,8 +1,8 @@
 ---
-description: Native Rust schema validation for Polars DataFrames, with a Pandera-like Python API.
+description: Native Rust schema validation for Polars DataFrames.
 ---
 
-# FrameLaw
+# Framelaw
 
 **The law your DataFrames must obey.**
 
@@ -13,7 +13,7 @@ description: Native Rust schema validation for Polars DataFrames, with a Pandera
 
 <div class="hero" markdown>
 
-FrameLaw validates Polars `DataFrame`s and `LazyFrame`s against a declarative
+Framelaw validates Polars `DataFrame`s and `LazyFrame`s against a declarative
 schema — column types, nullability, value constraints, and cross-column rules
 — in parallel Rust, behind a small, Pandera-like Python API.
 
@@ -22,7 +22,7 @@ schema — column types, nullability, value constraints, and cross-column rules
 
 </div>
 
-## Why FrameLaw
+## Why Framelaw
 
 <div class="grid cards" markdown>
 
@@ -84,7 +84,7 @@ pip install framelaw
 ```
 
 Prebuilt wheels ship for macOS, Linux, and Windows, so no Rust toolchain is
-needed. FrameLaw requires Python 3.10+, `polars>=1.0`, and `pydantic>=2`.
+needed. Framelaw requires Python 3.10+, `polars>=1.0`, and `pydantic>=2`.
 See [Installation](installation.md) for source builds and platform details.
 
 ## Validate your first frame

@@ -1,4 +1,4 @@
-# Contributing to FrameLaw
+# Contributing to Framelaw
 
 Thanks for contributing. This guide covers setup, workflow, and the gates
 every change must pass.

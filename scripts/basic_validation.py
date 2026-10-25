@@ -1,4 +1,4 @@
-"""Core FrameLaw workflows end to end: schemas, inference, and reports."""
+"""Core Framelaw workflows end to end: schemas, inference, and reports."""
 
 from datetime import date
 from typing import Literal

@@ -1,15 +1,15 @@
-# FrameLaw
+# Framelaw
 
 **The law your DataFrames must obey.** Native Rust schema validation for
 Polars, with a Pandera-like Python API.
 
 [![PyPI](https://img.shields.io/pypi/v/framelaw.svg)](https://pypi.org/project/framelaw/)
 [![Python versions](https://img.shields.io/pypi/pyversions/framelaw.svg)](https://pypi.org/project/framelaw/)
-[![CI](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml)
+[![CI](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-live-blue)](https://adrien-riaux.github.io/framelaw/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/adrien-riaux/framelaw/blob/main/LICENSE)
 
-FrameLaw validates Polars `DataFrame`s and `LazyFrame`s against a declarative
+Framelaw validates Polars `DataFrame`s and `LazyFrame`s against a declarative
 schema — column types, nullability, value constraints, and cross-column rules
 — in parallel Rust, behind a small Python API.
 
@@ -39,7 +39,7 @@ uv add framelaw
 ```
 
 Prebuilt wheels ship for macOS (arm64 and x86_64), Linux (x86_64 and
-aarch64), and Windows (x86_64). FrameLaw requires Python 3.10+, Polars 1.0+,
+aarch64), and Windows (x86_64). Framelaw requires Python 3.10+, Polars 1.0+,
 and Pydantic 2.x.
 
 ## Quickstart

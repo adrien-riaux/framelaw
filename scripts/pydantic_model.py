@@ -1,4 +1,4 @@
-"""Derive a FrameLaw schema from a Pydantic model."""
+"""Derive a Framelaw schema from a Pydantic model."""
 
 import polars as pl
 from framelaw import Schema

@@ -1,6 +1,6 @@
 # Pydantic integration
 
-If you already model your data with Pydantic v2, derive a FrameLaw schema
+If you already model your data with Pydantic v2, derive a Framelaw schema
 directly from the `BaseModel` — field types and `Field(...)` constraints
 translate to columns and checks automatically.
 
@@ -19,12 +19,12 @@ class User(BaseModel):
 schema = fl.Schema.from_pydantic(User)
 ```
 
-FrameLaw reads the model's `__pydantic_core_schema__` natively, without
+Framelaw reads the model's `__pydantic_core_schema__` natively, without
 Python reflection overhead.
 
 ## Type mapping
 
-| Pydantic | FrameLaw dtype | Checks |
+| Pydantic | Framelaw dtype | Checks |
 |---|---|---|
 | `int` | `pl.Int64` | `not_null()` |
 | `float` | `pl.Float64` | `not_null()` |
@@ -48,5 +48,5 @@ rather than silently producing a weaker schema.
 > check explicitly when you need one:
 > `schema["email"].add_check(fl.checks.column.str_length_between(3, 254))`.
 
-> FrameLaw targets Pydantic v2 only; models must expose
+> Framelaw targets Pydantic v2 only; models must expose
 > `__pydantic_core_schema__`.

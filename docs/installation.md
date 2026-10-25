@@ -1,6 +1,6 @@
 # Installation
 
-FrameLaw is a native Rust extension with prebuilt wheels for the common
+Framelaw is a native Rust extension with prebuilt wheels for the common
 platforms. Installing it does **not** require a Rust toolchain.
 
 ## Requirements
@@ -78,5 +78,5 @@ does **not** compile the Rust extension.
 ## Next steps
 
 - [Quickstart](quickstart.md) — validate a frame in five minutes.
-- [Why FrameLaw](why-framelaw.md) — design principles and trade-offs.
+- [Why Framelaw](why-framelaw.md) — design principles and trade-offs.
 - [API reference](reference/index.md) — every class and constructor.

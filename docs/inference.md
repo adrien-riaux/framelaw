@@ -1,6 +1,6 @@
 # Schema inference
 
-Given an existing DataFrame, FrameLaw can draft a starting `Schema` for you.
+Given an existing DataFrame, Framelaw can draft a starting `Schema` for you.
 Inference is a first draft, not a final answer: review it, tighten it, then
 persist it.
 
