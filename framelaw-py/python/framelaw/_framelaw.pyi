@@ -1,4 +1,4 @@
-"""Type stubs for FrameLaw's compiled Rust extension.
+"""Type stubs for Framelaw's compiled Rust extension.
 
 This file is never executed at runtime (the import system ignores `.pyi`
 files when a compiled module is present). It exists so type checkers and
