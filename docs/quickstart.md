@@ -6,7 +6,7 @@
 uv add framelaw
 ```
 
-FrameLaw is published on PyPI and ships prebuilt wheels for the native Rust
+Framelaw is published on PyPI and ships prebuilt wheels for the native Rust
 extension, so no Rust toolchain is needed. It requires Python 3.10+ and pulls
 in its Python dependencies (`polars>=1.0`, `pydantic>=2`) automatically.
 

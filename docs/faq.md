@@ -34,7 +34,7 @@ values that are present.
 
 ## Why is my `Int32` column rejected by an `Int64` schema?
 
-FrameLaw requires an exact dtype match (structural for nested types). `Int32`
+Framelaw requires an exact dtype match (structural for nested types). `Int32`
 and `Int64` are different storage types, and silently widening them would hide
 a real schema drift. Use the dtype you actually store, or cast at the
 boundary.
@@ -46,16 +46,16 @@ Chunked validation runs one batch at a time. Dataset-wide checks — `unique`,
 that straddles a batch boundary is not detected. Validate the full frame when
 those checks matter, or deduplicate before chunking.
 
-## Does FrameLaw validate `LazyFrame`s lazily?
+## Does Framelaw validate `LazyFrame`s lazily?
 
 `validate_lazy()` and `validate()` collect a `LazyFrame` once at the
 validation boundary. With `chunk_rows`, they slice and collect one batch at a
 time, so the full frame is never materialized. The validation itself is eager
 per batch.
 
-## Can I use FrameLaw with Pandas or Spark?
+## Can I use Framelaw with Pandas or Spark?
 
-No. FrameLaw is built on Polars' native columnar buffers and exposes Polars
+No. Framelaw is built on Polars' native columnar buffers and exposes Polars
 dtypes in schemas. Pandera or Great Expectations are better fits for other
 engines.
 
@@ -68,7 +68,7 @@ returns data that would fail its own schema.
 
 ## Why does `from_pydantic` ignore `min_length` / `max_length` on strings?
 
-Pydantic string-length constraints are not mapped yet. FrameLaw does have a
+Pydantic string-length constraints are not mapped yet. Framelaw does have a
 string-length check, so add it explicitly after deriving the schema:
 
 ```python
@@ -85,7 +85,7 @@ Length constraints on `list` fields are mapped to `list_len_between`.
 
 ## Which Pydantic versions are supported?
 
-Pydantic v2 only. FrameLaw reads `__pydantic_core_schema__` directly; v1
+Pydantic v2 only. Framelaw reads `__pydantic_core_schema__` directly; v1
 models do not expose that structure.
 
 ## Why do I get a `DeprecationWarning` for `fl.gt(...)`?

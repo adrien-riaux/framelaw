@@ -1,6 +1,6 @@
 # Benchmarks
 
-FrameLaw is built for throughput on Polars data, but benchmark numbers are
+Framelaw is built for throughput on Polars data, but benchmark numbers are
 only useful with the build profile, hardware, and workload attached. This page
 documents the scripts and the methodology; re-run them on your own machine
 before quoting numbers.
@@ -63,6 +63,6 @@ nested-specific numbers.
 ## Comparing against another tool
 
 If you publish a comparison, pin the versions, use the same input frame, and
-measure end-to-end (including any conversion the other tool needs). FrameLaw
+measure end-to-end (including any conversion the other tool needs). Framelaw
 validates native Polars memory; a tool that converts to Python objects or
 another frame format pays a cost that a pure validation loop does not.

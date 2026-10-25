@@ -1,6 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="FrameLaw">
-  <rect width="64" height="64" rx="14" fill="#3f51b5"/>
-  <rect x="13" y="14" width="38" height="36" rx="5" fill="none" stroke="#ffffff" stroke-width="3"/>
-  <path d="M13 24h38M24 24v26M35 24v26" stroke="#ffffff" stroke-width="3" opacity="0.75"/>
-  <path d="M27 39l5 5 11-12" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Framelaw">
+  <defs>
+    <linearGradient id="fl-bg" x1="9" y1="3" x2="55" y2="61" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#818cf8"/>
+      <stop offset="0.5" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#252063"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#fl-bg)"/>
+  <path d="M45 13H20a8 8 0 0 0-8 8v22a8 8 0 0 0 8 8h24a8 8 0 0 0 8-8V30" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+  <path d="m19 36 10 10 21-24" fill="none" stroke="#ffffff" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

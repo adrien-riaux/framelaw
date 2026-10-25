@@ -1,6 +1,6 @@
 # API overview
 
-FrameLaw exposes a small surface: schema objects at the top level, check
+Framelaw exposes a small surface: schema objects at the top level, check
 constructors grouped by scope, and a report type for structured failures.
 
 ```python

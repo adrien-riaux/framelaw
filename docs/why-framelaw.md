@@ -1,10 +1,10 @@
-# Why FrameLaw
+# Why Framelaw
 
-FrameLaw is a schema-first validator for Polars. It is deliberately narrow:
+Framelaw is a schema-first validator for Polars. It is deliberately narrow:
 one data engine, one schema representation, and a small API that is easy to
 persist and reuse.
 
-## What FrameLaw optimizes for
+## What Framelaw optimizes for
 
 - **Validation speed on Polars data.** The engine runs in Rust on Polars'
   columnar buffers, with checks parallelized across columns. There is no
@@ -20,7 +20,7 @@ persist and reuse.
 
 ## How it compares
 
-| | FrameLaw | Pandera | Great Expectations | Hand-written checks |
+| | Framelaw | Pandera | Great Expectations | Hand-written checks |
 |---|---|---|---|---|
 | Primary engine | Polars + Rust | Pandas / Polars / PySpark | Multiple backends | Whatever you write |
 | Schema definition | Python objects + versioned JSON | Python / YAML | YAML / Python | Ad hoc |
@@ -33,10 +33,10 @@ persist and reuse.
 
 The comparison is about shape, not a claim that one tool is universally
 better. Pandera and Great Expectations cover more backends and more
-operational features; FrameLaw trades that breadth for a tight Polars/Rust
+operational features; Framelaw trades that breadth for a tight Polars/Rust
 implementation and a schema format that is trivial to serialize.
 
-## When FrameLaw is a good fit
+## When Framelaw is a good fit
 
 - Your data already lives in **Polars**, and validation is on the hot path.
 - You want a **single schema artifact** that can be checked into a repo,
@@ -47,14 +47,14 @@ implementation and a schema format that is trivial to serialize.
 
 ## When it is not
 
-- You need **Pandas, Spark, or SQL** validation. FrameLaw is Polars-only.
+- You need **Pandas, Spark, or SQL** validation. Framelaw is Polars-only.
 - You need a **profiling UI, data docs, or an expectation suite runner**.
   Great Expectations is the better tool for that workflow.
 - You need **streaming validation** over unbounded data. `chunk_rows` batches
   a finite frame; it is not a streaming engine.
-- You need a **stable 1.0 API**. FrameLaw is pre-1.0 and may still make
+- You need a **stable 1.0 API**. Framelaw is pre-1.0 and may still make
   breaking changes between minor releases; see the
-  [changelog](changelog.md).
+  [changelog](https://github.com/adrien-riaux/framelaw/blob/main/CHANGELOG.md).
 
 ## Design principles
 

@@ -1,6 +1,6 @@
 # Architecture
 
-FrameLaw is a Cargo workspace with a strict separation between the pure-Rust
+Framelaw is a Cargo workspace with a strict separation between the pure-Rust
 engine and the Python bindings.
 
 ## Crates
