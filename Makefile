@@ -1,4 +1,4 @@
-.PHONY: help format lint build build-release test scripts wheel publish clean
+.PHONY: help format lint build build-release test scripts docs-serve docs-build docs-check wheel publish clean
 
 help:
 	@echo "Available commands:"
@@ -8,6 +8,9 @@ help:
 	@echo "  make build-release - Rebuild the extension optimized (--release)"
 	@echo "  make test          - Rust + Python test suites"
 	@echo "  make scripts       - Run every smoke-test / benchmark script"
+	@echo "  make docs-serve    - Live-preview the documentation site"
+	@echo "  make docs-build    - Strict documentation build into ./site"
+	@echo "  make docs-check    - Strict build + execute runnable docs snippets"
 	@echo "  make wheel         - Release wheel + sdist into ./dist"
 	@echo "  make publish       - Upload ./dist to TestPyPI (PYPI_URL=... to override)"
 	@echo "  make clean         - Clean the build artifacts"
@@ -42,6 +45,7 @@ build-release:
 wheel:
 	@echo "=> Building release wheel + sdist into ./dist..."
 	uvx maturin build --release --manifest-path framelaw-py/Cargo.toml --out dist
+	uvx maturin sdist --manifest-path framelaw-py/Cargo.toml --out dist
 
 publish: wheel
 	@echo "=> Uploading ./dist (default: TestPyPI)..."
@@ -58,6 +62,18 @@ scripts:
 	for script in scripts/*.py; do \
 		uv run --with-editable ./framelaw-py python "$$script"; \
 	done
+
+docs-serve:
+	@echo "=> Serving documentation at http://127.0.0.1:8000..."
+	uvx --with-requirements docs/requirements.txt mkdocs serve
+
+docs-build:
+	@echo "=> Building documentation (strict)..."
+	uvx --with-requirements docs/requirements.txt mkdocs build --strict
+
+docs-check: docs-build
+	@echo "=> Executing runnable documentation snippets..."
+	uv run --with-editable ./framelaw-py python scripts/check_docs.py
 
 clean:
 	cargo clean

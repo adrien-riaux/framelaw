@@ -22,7 +22,7 @@ schema.validate(pl.scan_csv("users.csv"))  # LazyFrame works too
 | `String` | regex, `one_of`, uniqueness |
 | `Boolean` | nullability, uniqueness |
 | `Date`, `Datetime`, `Duration`, `Time` | temporal bounds via `gt`/`gte`/`lt`/`lte`/`between` |
-| `List`, `Array`, `Struct` | nested validation (one level) |
+| `List`, `Array`, `Struct` | nested validation to arbitrary depth |
 | `Null` | treated as always-nullable |
 | other scalar dtypes | dtype + nullability enforcement |
 

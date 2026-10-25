@@ -42,7 +42,7 @@ except ValueError as err:
 
 # Option B: get a report object instead
 report = schema.validate(df, raise_on_error=False)
-if not report.is_valid():
+if report is not None and not report.is_valid():
     print(report.summary())
     print(report.to_dataframe())
 ```

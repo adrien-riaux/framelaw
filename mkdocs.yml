@@ -1,0 +1,145 @@
+site_name: FrameLaw
+site_description: Native Rust schema validation for Polars DataFrames.
+site_author: Adrien Riaux
+site_url: https://adrien-riaux.github.io/framelaw/
+copyright: Copyright &copy; 2026 Adrien Riaux
+repo_url: https://github.com/adrien-riaux/framelaw
+repo_name: adrien-riaux/framelaw
+edit_uri: edit/main/docs/
+docs_dir: docs
+strict: true
+
+validation:
+  omitted_files: warn
+  absolute_links: relative_to_docs
+  anchors: warn
+  unrecognized_links: warn
+
+theme:
+  name: material
+  language: en
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: installation.md
+      - Quickstart: quickstart.md
+      - Why FrameLaw: why-framelaw.md
+  - Guide:
+      - Schemas & columns: schemas.md
+      - Checks: checks.md
+      - Cross-column checks: cross-column-checks.md
+      - Nested types: nested-types.md
+      - Error reports: error-reports.md
+      - Lazy & chunked validation: lazy-validation.md
+      - Schema inference: inference.md
+      - Data generation: data-generation.md
+      - Serialization: serialization.md
+  - Integrations:
+      - Pydantic: pydantic.md
+      - Polars: polars.md
+  - Reference:
+      - API overview: reference/index.md
+      - Schema & columns: reference/schema.md
+      - Single-column checks: reference/checks.md
+      - Table checks: reference/table-checks.md
+      - Reports: reference/reports.md
+      - Functions: reference/functions.md
+  - Resources:
+      - Recipes: recipes.md
+      - FAQ: faq.md
+      - Benchmarks: benchmarks.md
+  - Project:
+      - Architecture: architecture.md
+      - Changelog: changelog.md
+      - Contributing: contributing.md
+      - License: license.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      title: On this page
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path:
+        - .
+      check_paths: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths:
+            - framelaw-py/python
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            merge_init_into_class: true
+            inherited_members: false
+            filters:
+              - "!^_"
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/adrien-riaux/framelaw
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/framelaw/
+
+extra_css:
+  - assets/stylesheets/extra.css

@@ -1,0 +1,21 @@
+/* Small refinements on top of Material for MkDocs. */
+
+.md-typeset .hero {
+  padding: 1.2rem 0 0.4rem;
+}
+
+.md-typeset .hero p {
+  font-size: 1.05rem;
+}
+
+.md-typeset .hero .md-button {
+  margin-top: 0.4rem;
+}
+
+.md-typeset .grid.cards > ul > li {
+  border-radius: 0.4rem;
+}
+
+.md-typeset code {
+  border-radius: 0.2rem;
+}

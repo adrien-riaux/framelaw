@@ -1,7 +1,10 @@
 [package]
 name = "framelaw-core"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
+description = "Pure-Rust schema validation engine for Polars DataFrames"
+license = "MIT"
+repository = "https://github.com/adrien-riaux/framelaw"
 
 [dependencies]
 polars = { version = "0.55.2", default-features = false, features = ["lazy", "strings", "regex", "temporal", "dtype-struct", "dtype-array", "dtype-i128", "dtype-u128", "dtype-f16"] }

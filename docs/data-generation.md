@@ -5,6 +5,18 @@ checks, and demos. Generation runs in Rust from the same checks validation
 enforces, with a seeded RNG for reproducibility.
 
 ```python
+import polars as pl
+import framelaw as fl
+
+schema = fl.Schema(
+    {
+        "id": fl.Column(pl.Int64, nullable=False, checks=[fl.checks.column.unique()]),
+        "score": fl.Column(pl.Float64, checks=[fl.checks.column.between(0.0, 1.0)]),
+    }
+)
+```
+
+```python
 frame = schema.sample(100)            # 100 valid rows, random seed
 frame = schema.sample(100, seed=42)   # deterministic
 frame = fl.sample(schema, 100, seed=42)  # top-level equivalent
