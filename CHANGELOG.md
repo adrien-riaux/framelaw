@@ -3,6 +3,23 @@
 All notable changes to Framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] — 2026-10-25
+
+### Python API
+
+- Check constructors moved under the `framelaw.checks` namespace:
+  single-column checks now live in `framelaw.checks.column`
+  (`fl.checks.column.gt(0)`) and cross-column checks in
+  `framelaw.checks.table` (`fl.checks.table.lt_column("start", "end")`).
+  `infer_schema` and `sample` remain top-level.
+
+### Deprecations
+
+- The previous top-level check names (`framelaw.gt`, `framelaw.lt_column`,
+  ...) still work but emit `DeprecationWarning` and will be removed in a
+  future release. Migrate to `framelaw.checks.column` /
+  `framelaw.checks.table`.
+
 ## [0.2.0] — 2026-10-25
 
 ### Python API

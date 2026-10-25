@@ -1,16 +1,14 @@
 """Framelaw example: cross-column checks and nested types."""
 
 import polars as pl
-from framelaw import (
-    Column,
-    Schema,
+from framelaw import Column, Schema
+from framelaw.checks.column import (
     list_len_between,
     list_not_empty,
-    lt_column,
     matches,
     struct_field,
-    unique_together,
 )
+from framelaw.checks.table import lt_column, unique_together
 from pydantic import BaseModel, Field
 
 

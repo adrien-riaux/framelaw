@@ -13,8 +13,8 @@ schema = fl.Schema(
         "city": fl.Column(pl.String),
     },
     dataframe_checks=[
-        fl.lt_column("start", "end"),
-        fl.unique_together(["country", "city"]),
+        fl.checks.table.lt_column("start", "end"),
+        fl.checks.table.unique_together(["country", "city"]),
     ],
 )
 ```
@@ -23,17 +23,17 @@ schema = fl.Schema(
 
 | Function | Rule |
 |---|---|
-| `fl.lt_column(a, b)` | `a < b` |
-| `fl.lte_column(a, b)` | `a <= b` |
-| `fl.gt_column(a, b)` | `a > b` |
-| `fl.gte_column(a, b)` | `a >= b` |
-| `fl.eq_columns(a, b)` | `a == b` |
-| `fl.ne_columns(a, b)` | `a != b` |
-| `fl.ordered([a, b, ...], strict)` | chain `a (<=|<) b (<=|<) ...` per row |
-| `fl.sum_columns([a, b, ...], target, tolerance=None)` | `target == a + b + ...` per row |
-| `fl.implies(left, by)` | non-null `left` requires non-null `by` |
-| `fl.determines(a, b)` | `a` functionally determines `b` |
-| `fl.within(left, right, max_gap: timedelta)` | `right - left` within `max_gap` (temporal) |
+| `fl.checks.table.lt_column(a, b)` | `a < b` |
+| `fl.checks.table.lte_column(a, b)` | `a <= b` |
+| `fl.checks.table.gt_column(a, b)` | `a > b` |
+| `fl.checks.table.gte_column(a, b)` | `a >= b` |
+| `fl.checks.table.eq_columns(a, b)` | `a == b` |
+| `fl.checks.table.ne_columns(a, b)` | `a != b` |
+| `fl.checks.table.ordered([a, b, ...], strict)` | chain `a (<=|<) b (<=|<) ...` per row |
+| `fl.checks.table.sum_columns([a, b, ...], target, tolerance=None)` | `target == a + b + ...` per row |
+| `fl.checks.table.implies(left, by)` | non-null `left` requires non-null `by` |
+| `fl.checks.table.determines(a, b)` | `a` functionally determines `b` |
+| `fl.checks.table.within(left, right, max_gap: timedelta)` | `right - left` within `max_gap` (temporal) |
 
 Semantics:
 
@@ -54,7 +54,7 @@ indices.
 ## Uniqueness across columns
 
 ```python
-fl.unique_together(["country", "city"])
+fl.checks.table.unique_together(["country", "city"])
 ```
 
 Fails when the same combination appears in more than one row; all rows in
@@ -64,9 +64,9 @@ each duplicated group are reported. Needs at least two columns.
 
 ```python
 # a <= b <= c in every row
-fl.ordered(["a", "b", "c"], strict=False)
+fl.checks.table.ordered(["a", "b", "c"], strict=False)
 # a < b < c (strict mode rejects equal neighbours too)
-fl.ordered(["a", "b", "c"], strict=True)
+fl.checks.table.ordered(["a", "b", "c"], strict=True)
 ```
 
 - The chain is evaluated per row over adjacent pairs; each violation is
@@ -80,9 +80,9 @@ fl.ordered(["a", "b", "c"], strict=True)
 
 ```python
 # c == a + b in every row
-fl.sum_columns(["a", "b"], "c")
+fl.checks.table.sum_columns(["a", "b"], "c")
 # tolerate floating-point slack (defaults to exact, tolerance=0.0)
-fl.sum_columns(["price", "tax"], "total", tolerance=1e-9)
+fl.checks.table.sum_columns(["price", "tax"], "total", tolerance=1e-9)
 ```
 
 - All columns must be numeric; integer columns with no float or mixed
@@ -97,7 +97,7 @@ fl.sum_columns(["price", "tax"], "total", tolerance=1e-9)
 
 ```python
 # if 'left' is present, 'by' must be present too
-fl.implies("left", "by")
+fl.checks.table.implies("left", "by")
 ```
 
 Rows with a null `left` never fail; rows with a non-null `left` and a null
@@ -107,7 +107,7 @@ Rows with a null `left` never fail; rows with a non-null `left` and a null
 
 ```python
 # one 'b' value per distinct 'a' value
-fl.determines("a", "b")
+fl.checks.table.determines("a", "b")
 ```
 
 The first non-null `b` seen for each `a` is canonical; every row whose `b`
@@ -120,7 +120,7 @@ null `b` cells do not participate.
 from datetime import timedelta
 
 # shipping_date <= delivery_date, at most 14 days apart
-fl.within("shipping_date", "delivery_date", timedelta(days=14))
+fl.checks.table.within("shipping_date", "delivery_date", timedelta(days=14))
 ```
 
 - Both columns must be temporal and share the exact same dtype; anything

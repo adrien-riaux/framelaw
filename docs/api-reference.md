@@ -1,7 +1,8 @@
 # API reference
 
-Complete reference for the `framelaw` package. Everything below is importable
-from the top level (`import framelaw as fl`).
+Complete reference for the `framelaw` package. Core classes and helpers are
+importable from the top level (`import framelaw as fl`); check constructors
+live in the `framelaw.checks` submodules.
 
 ## Module
 
@@ -9,6 +10,13 @@ from the top level (`import framelaw as fl`).
 
 `str` — the installed distribution version in PEP 440 form (for example
 `"0.1.0"` or `"0.1.1rc1"`), read from the package metadata.
+
+### `framelaw.checks`
+
+Namespace for check constructors: [`framelaw.checks.column`](#check-constructors)
+for single-column checks and [`framelaw.checks.table`](#table-check-constructors)
+for cross-column checks. The pre-0.3 top-level names (`framelaw.gt`,
+`framelaw.lt_column`, ...) still work but emit `DeprecationWarning`.
 
 ## Classes
 
@@ -47,19 +55,19 @@ Column(dtype, nullable=True, checks=None)
 Opaque value returned by the check constructors below. Combine freely in a
 column's `checks` list.
 
-Single-column constructors: `not_null`, `unique_values` (alias `unique`),
-`gt`, `lt`, `gte`, `lte`, `between`, `matches_regex` (alias `matches`),
-`is_in` (alias `one_of`), `list_len_between`, `list_not_empty`,
-`struct_field(field, checks)`.
+Single-column constructors in `framelaw.checks.column`: `not_null`,
+`unique_values` (alias `unique`), `gt`, `lt`, `gte`, `lte`, `between`,
+`matches_regex` (alias `matches`), `is_in` (alias `one_of`),
+`list_len_between`, `list_not_empty`, `struct_field(field, checks)`.
 
 ### `DataFrameCheck`
 
 Opaque value returned by the table-check constructors. Pass via
 `Schema(..., dataframe_checks=[...])`.
 
-Table-check constructors: `gt_column`, `lt_column`, `gte_column`,
-`lte_column`, `eq_columns`, `ne_columns`, `unique_together`, `ordered`,
-`sum_columns`, `implies`, `determines`, `within`.
+Table-check constructors in `framelaw.checks.table`: `gt_column`, `lt_column`,
+`gte_column`, `lte_column`, `eq_columns`, `ne_columns`, `unique_together`,
+`ordered`, `sum_columns`, `implies`, `determines`, `within`.
 
 ### `ValidationReport`
 
@@ -97,6 +105,8 @@ Table-check constructors: `gt_column`, `lt_column`, `gte_column`,
 
 ### Check constructors
 
+All single-column constructors live in `framelaw.checks.column`.
+
 | Function | Signature |
 |---|---|
 | `not_null()` | — |
@@ -113,6 +123,8 @@ Table-check constructors: `gt_column`, `lt_column`, `gte_column`,
 | `struct_field(field, checks)` | field name + list of checks |
 
 ### Table-check constructors
+
+All cross-column constructors live in `framelaw.checks.table`.
 
 | Function | Signature |
 |---|---|

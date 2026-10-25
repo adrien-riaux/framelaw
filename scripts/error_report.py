@@ -1,7 +1,8 @@
 """Inspect validation failures as structured data."""
 
 import polars as pl
-from framelaw import Column, Schema, gt, one_of
+from framelaw import Column, Schema
+from framelaw.checks.column import gt, one_of
 
 
 def main() -> None:

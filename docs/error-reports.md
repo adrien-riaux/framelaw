@@ -40,7 +40,7 @@ Special check names you may see that are not user-constructed:
 
 - `Dtype` — column dtype does not match the schema.
 - `ColumnExists` — a required column is missing from the frame.
-- `NotNull` — emitted by `nullable=False` (as well as `fl.not_null()`).
+- `NotNull` — emitted by `nullable=False` (as well as `fl.checks.column.not_null()`).
 
 ## Report as a DataFrame
 

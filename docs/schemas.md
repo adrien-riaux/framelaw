@@ -11,11 +11,11 @@ import framelaw as fl
 
 schema = fl.Schema(
     {
-        "user_id": fl.Column(pl.Int64, nullable=False, checks=[fl.unique()]),
-        "age": fl.Column(pl.Int32, nullable=False, checks=[fl.gt(0), fl.lt(120)]),
-        "score": fl.Column(pl.Float64, checks=[fl.between(0.0, 1.0)]),
+        "user_id": fl.Column(pl.Int64, nullable=False, checks=[fl.checks.column.unique()]),
+        "age": fl.Column(pl.Int32, nullable=False, checks=[fl.checks.column.gt(0), fl.checks.column.lt(120)]),
+        "score": fl.Column(pl.Float64, checks=[fl.checks.column.between(0.0, 1.0)]),
     },
-    dataframe_checks=[fl.lt_column("start", "end")],  # optional
+    dataframe_checks=[fl.checks.table.lt_column("start", "end")],  # optional
     lazy=False,  # optional, see Lazy validation
 )
 ```
@@ -43,15 +43,15 @@ Column(dtype, nullable=True, checks=None)
   an exact (structural) dtype match — see [Polars integration](polars.md).
 - `nullable`: when `False`, any null value fails with a `NotNull` error
   listing the offending rows. Defaults to `True`.
-- `checks`: list of checks such as `fl.gt(0)`. See [Checks](checks.md).
+- `checks`: list of checks such as `fl.checks.column.gt(0)`. See [Checks](checks.md).
 
 ### Refining a column after creation
 
 Indexing a schema with a column name returns a mutable reference:
 
 ```python
-schema["age"].add_check(fl.lt(120))
-schema["email"].add_check(fl.matches(r".+@.+\..+"))
+schema["age"].add_check(fl.checks.column.lt(120))
+schema["email"].add_check(fl.checks.column.matches(r".+@.+\..+"))
 ```
 
 Accessing a missing column raises `KeyError`. This is the intended workflow

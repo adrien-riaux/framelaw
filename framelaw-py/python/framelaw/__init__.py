@@ -2,17 +2,16 @@
 
 This module provides the main entrypoint for defining schemas
 and validating Polars DataFrames using high-performance Rust logic.
+
+Check constructors live in the :mod:`framelaw.checks` package:
+:mod:`framelaw.checks.column` for single-column checks and
+:mod:`framelaw.checks.table` for cross-column checks.
 """
 
 from importlib.metadata import PackageNotFoundError, version
 
-from ._framelaw import (
-    Check,
-    Column,
-    DataFrameCheck,
-    Schema,
-    ValidationError,
-    ValidationReport,
+from . import checks
+from ._compat import (
     between,
     determines,
     ends_with,
@@ -22,7 +21,6 @@ from ._framelaw import (
     gte,
     gte_column,
     implies,
-    infer_schema,
     is_in,
     list_len_between,
     list_not_empty,
@@ -37,7 +35,6 @@ from ._framelaw import (
     not_null,
     one_of,
     ordered,
-    sample,
     starts_with,
     str_length_between,
     struct_field,
@@ -46,6 +43,16 @@ from ._framelaw import (
     unique_together,
     unique_values,
     within,
+)
+from ._framelaw import (
+    Check,
+    Column,
+    DataFrameCheck,
+    Schema,
+    ValidationError,
+    ValidationReport,
+    infer_schema,
+    sample,
 )
 
 try:
@@ -61,11 +68,14 @@ __all__ = [
     "Schema",
     "ValidationError",
     "ValidationReport",
+    "checks",
+    "infer_schema",
+    "sample",
+    # Deprecated top-level check aliases, kept for compatibility.
     "not_null",
     "unique_values",
     "gt",
     "gte",
-    "infer_schema",
     "lt",
     "lte",
     "between",
@@ -93,5 +103,4 @@ __all__ = [
     "implies",
     "determines",
     "within",
-    "sample",
 ]

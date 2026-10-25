@@ -10,8 +10,8 @@ df = pl.read_csv("users.csv")
 schema = fl.infer_schema(df)
 print(schema.to_json())  # inspect what was inferred
 
-schema["age"].add_check(fl.lt(120))
-schema["email"].add_check(fl.matches(r".+@.+\..+"))
+schema["age"].add_check(fl.checks.column.lt(120))
+schema["email"].add_check(fl.checks.column.matches(r".+@.+\..+"))
 
 schema.validate(df)  # raises if anything fails
 ```

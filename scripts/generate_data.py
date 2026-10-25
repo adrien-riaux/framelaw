@@ -1,7 +1,9 @@
 """Generate valid test data from a schema."""
 
 import polars as pl
-from framelaw import Column, Schema, gt, lt, lt_column, one_of, sample
+from framelaw import Column, Schema, sample
+from framelaw.checks.column import gt, lt, one_of
+from framelaw.checks.table import lt_column
 
 
 def main() -> None:
