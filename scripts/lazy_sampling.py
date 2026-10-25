@@ -1,7 +1,9 @@
 """Framelaw example: lazy validation mode and data generation."""
 
 import polars as pl
-from framelaw import Column, Schema, gt, list_len_between, lt_column, one_of, sample
+from framelaw import Column, Schema, sample
+from framelaw.checks.column import gt, list_len_between, one_of
+from framelaw.checks.table import lt_column
 
 
 def main() -> None:

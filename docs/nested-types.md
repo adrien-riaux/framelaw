@@ -21,13 +21,13 @@ Declare the full nested dtype and add length checks:
 ```python
 fl.Column(
     pl.List(pl.Int64),
-    checks=[fl.list_len_between(1, 3), fl.list_not_empty()],
+    checks=[fl.checks.column.list_len_between(1, 3), fl.checks.column.list_not_empty()],
 )
 ```
 
-- `fl.list_len_between(min_len, max_len)` fails with the outer row indices
+- `fl.checks.column.list_len_between(min_len, max_len)` fails with the outer row indices
   whose list length falls outside the inclusive range.
-- `fl.list_not_empty()` fails on empty (non-null) lists.
+- `fl.checks.column.list_not_empty()` fails on empty (non-null) lists.
 - Null rows are skipped; govern them with `nullable`.
 
 ## Structs
@@ -38,7 +38,7 @@ against the parent column with the field named in the message:
 ```python
 fl.Column(
     pl.Struct({"city": pl.String, "zip": pl.String}),
-    checks=[fl.struct_field("zip", [fl.matches(r"^\d{5}$")])],
+    checks=[fl.checks.column.struct_field("zip", [fl.checks.column.matches(r"^\d{5}$")])],
 )
 ```
 

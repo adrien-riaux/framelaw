@@ -18,10 +18,10 @@ import framelaw as fl
 
 schema = fl.Schema(
     {
-        "user_id": fl.Column(pl.Int64, nullable=False, checks=[fl.unique()]),
-        "age": fl.Column(pl.Int64, nullable=False, checks=[fl.gt(0), fl.lt(120)]),
-        "email": fl.Column(pl.String, checks=[fl.matches(r".+@.+\..+")]),
-        "country": fl.Column(pl.String, checks=[fl.one_of(["FR", "US", "DE"])]),
+        "user_id": fl.Column(pl.Int64, nullable=False, checks=[fl.checks.column.unique()]),
+        "age": fl.Column(pl.Int64, nullable=False, checks=[fl.checks.column.gt(0), fl.checks.column.lt(120)]),
+        "email": fl.Column(pl.String, checks=[fl.checks.column.matches(r".+@.+\..+")]),
+        "country": fl.Column(pl.String, checks=[fl.checks.column.one_of(["FR", "US", "DE"])]),
     }
 )
 

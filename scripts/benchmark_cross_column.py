@@ -4,15 +4,8 @@ import time
 from datetime import timedelta
 
 import polars as pl
-from framelaw import (
-    Column,
-    Schema,
-    determines,
-    implies,
-    ordered,
-    sum_columns,
-    within,
-)
+from framelaw import Column, Schema
+from framelaw.checks.table import determines, implies, ordered, sum_columns, within
 
 
 def bench(label: str, schema: Schema, df: pl.DataFrame, rounds: int = 5) -> None:

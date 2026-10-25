@@ -4,7 +4,8 @@ from datetime import date
 from typing import Literal
 
 import polars as pl
-from framelaw import Column, Schema, gt, infer_schema, lt, not_null
+from framelaw import Column, Schema, infer_schema
+from framelaw.checks.column import gt, lt, not_null
 from pydantic import BaseModel, Field
 
 

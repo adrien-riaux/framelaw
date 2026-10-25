@@ -1,7 +1,8 @@
 """Infer a schema from trusted data, refine it, then enforce it."""
 
 import polars as pl
-from framelaw import infer_schema, lt
+from framelaw import infer_schema
+from framelaw.checks.column import lt
 
 
 def main() -> None:

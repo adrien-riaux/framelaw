@@ -3,7 +3,8 @@
 import time
 
 import polars as pl
-from framelaw import Column, Schema, gt, lt, matches, one_of, unique
+from framelaw import Column, Schema
+from framelaw.checks.column import gt, lt, matches, one_of, unique
 
 
 def bench(label: str, schema: Schema, df: pl.DataFrame, rounds: int = 5) -> None:

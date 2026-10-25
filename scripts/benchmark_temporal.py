@@ -4,7 +4,8 @@ import time
 from datetime import date, timedelta
 
 import polars as pl
-from framelaw import Column, Schema, infer_schema, sample, within
+from framelaw import Column, Schema, infer_schema, sample
+from framelaw.checks.table import within
 
 ROUNDS = 5
 

@@ -63,7 +63,7 @@ report = schema.validate(df, chunk_rows=100_000)
 
 Two caveats:
 
-- Dataset-wide checks (`fl.unique()`, `fl.unique_together`,
+- Dataset-wide checks (`fl.checks.column.unique()`, `fl.unique_together`,
   `fl.determines`) only see one chunk at a time, so violations that span
   chunk boundaries go unnoticed at these row counts.
 - A perfectly aligned `chunk_rows` can reduce per-batch overhead; common
