@@ -76,7 +76,7 @@ Column 'country': rows [2], check 'OneOfString': Values in 'country' are not par
 ## Documentation
 
 Full documentation is published at
-**[github.io/framelaw](https://adrien-riaux.github.io/framelaw/)**.
+**[github.io/framelaw/](https://adrien-riaux.github.io/framelaw/)**.
 It covers the quickstart, schemas, every check, cross-column and nested
 validation, error reports, inference, lazy mode, data generation, Pydantic and
 Polars integration, serialization, and the generated API reference.

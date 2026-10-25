@@ -1,5 +1,5 @@
 ---
-description: Native Rust schema validation for Polars DataFrames, with a Pandera-like Python API.
+description: Native Rust schema validation for Polars DataFrames.
 ---
 
 # Framelaw
