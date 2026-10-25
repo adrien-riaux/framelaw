@@ -44,7 +44,7 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v4
       - name: Build with MkDocs (strict)
-        run: uvx --with-requirements docs/requirements.txt mkdocs build --strict
+        run: uvx --with-requirements docs/assets/requirements.txt mkdocs build --strict
       - name: Configure GitHub Pages
         if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
