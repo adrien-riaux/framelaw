@@ -1,18 +1,19 @@
 use polars::prelude::{DataFrame, NamedFrom, Series};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyType};
+use pyo3::types::{PyAny, PyDelta, PyDict, PyList, PyType};
 use pyo3_polars::{PyDataFrame, PyDataType};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use framelaw_core::checks::{
-    BetweenF64, Check, CheckSpec, GreaterThanF64, GreaterThanOrEqualF64, LessThanF64,
-    LessThanOrEqualF64, ListLenBetween, ListNotEmpty, MatchesRegex, NotNull, OneOfString,
-    StructFieldCheck, UniqueValues,
+    BetweenF64, Check, CheckSpec, EndsWith, GreaterThanF64, GreaterThanOrEqualF64, LessThanF64,
+    LessThanOrEqualF64, ListLenBetween, ListNotEmpty, MatchesRegex, NotBlank, NotNull,
+    OneOfNumericValues, OneOfString, StartsWith, StrLengthBetween, StructFieldCheck, UniqueValues,
 };
 use framelaw_core::column::ColumnSpec;
 use framelaw_core::dataframe_checks::{
-    ColumnComparison, CompareOp, DataFrameCheck, DataFrameCheckSpec, UniqueTogether,
+    ColumnComparison, CompareOp, DataFrameCheck, DataFrameCheckSpec, Determines, Implies, Ordered,
+    SumColumns, UniqueTogether, Within,
 };
 use framelaw_core::inference::infer_schema as infer_core_schema;
 use framelaw_core::schema::Schema;
@@ -28,6 +29,11 @@ enum CheckType {
     BetweenF64(f64, f64),
     MatchesRegex(String),
     OneOfString(Vec<String>),
+    OneOfNumeric(Vec<f64>),
+    StrLengthBetween(usize, usize),
+    NotBlank,
+    StartsWith(String),
+    EndsWith(String),
     ListLenBetween(usize, usize),
     ListNotEmpty,
     StructField(String, Vec<PyCheck>),
@@ -51,6 +57,11 @@ impl PyCheck {
             CheckSpec::Between(min, max) => CheckType::BetweenF64(min, max),
             CheckSpec::Matches(pattern) => CheckType::MatchesRegex(pattern),
             CheckSpec::OneOf(values) => CheckType::OneOfString(values),
+            CheckSpec::OneOfNumeric(values) => CheckType::OneOfNumeric(values),
+            CheckSpec::StrLengthBetween(min, max) => CheckType::StrLengthBetween(min, max),
+            CheckSpec::NotBlank => CheckType::NotBlank,
+            CheckSpec::StartsWith(prefix) => CheckType::StartsWith(prefix),
+            CheckSpec::EndsWith(suffix) => CheckType::EndsWith(suffix),
             CheckSpec::ListLenBetween(lo, hi) => CheckType::ListLenBetween(lo, hi),
             CheckSpec::ListNotEmpty => CheckType::ListNotEmpty,
             CheckSpec::StructField(field, inner) => {
@@ -82,6 +93,14 @@ impl PyCheck {
             CheckType::OneOfString(v) => Box::new(OneOfString {
                 allowed_values: v.into_iter().collect(),
             }),
+            CheckType::OneOfNumeric(v) => Box::new(OneOfNumericValues { allowed_values: v }),
+            CheckType::StrLengthBetween(min, max) => Box::new(StrLengthBetween {
+                min_len: min,
+                max_len: max,
+            }),
+            CheckType::NotBlank => Box::new(NotBlank),
+            CheckType::StartsWith(prefix) => Box::new(StartsWith { prefix }),
+            CheckType::EndsWith(suffix) => Box::new(EndsWith { suffix }),
             CheckType::ListLenBetween(lo, hi) => Box::new(ListLenBetween {
                 min_len: lo,
                 max_len: hi,
@@ -162,9 +181,69 @@ pub fn matches_regex(pattern: String) -> PyResult<PyCheck> {
 }
 
 #[pyfunction]
-pub fn is_in(allowed: Vec<String>) -> PyResult<PyCheck> {
+pub fn is_in_strings(allowed: Vec<String>) -> PyResult<PyCheck> {
     Ok(PyCheck {
         inner: CheckType::OneOfString(allowed),
+    })
+}
+
+/// Classifies an allowed-value list into a string or a numeric membership
+/// check. All elements must share one class: strings, or numbers/booleans.
+/// Numeric membership compares at `f64` granularity against `f64` rows and
+/// exactly against integer rows through the widened committed sets.
+#[pyfunction]
+pub fn is_in(allowed: &Bound<'_, PyList>) -> PyResult<PyCheck> {
+    if allowed.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "allowed list must not be empty",
+        ));
+    }
+    let mut strings: Vec<String> = Vec::with_capacity(allowed.len());
+    let mut numeric: Vec<f64> = Vec::with_capacity(allowed.len());
+    let mut saw_string = false;
+    let mut saw_number = false;
+    for item in allowed.iter() {
+        if item.is_instance_of::<pyo3::types::PyBool>() {
+            saw_number = true;
+            let truthy: bool = item.extract()?;
+            numeric.push(if truthy { 1.0 } else { 0.0 });
+        } else if item.is_instance_of::<pyo3::types::PyString>() {
+            saw_string = true;
+            strings.push(item.extract()?);
+        } else if item.is_instance_of::<pyo3::types::PyInt>() {
+            saw_number = true;
+            // Any i128 converts to a finite f64 (i128 tops out around
+            // 1.7e38, far below f64's range); values beyond the 2^53
+            // mantissa round, which the exact integer comparison in the
+            // core will honor per-row.
+            let value: i128 = item.extract()?;
+            numeric.push(value as f64);
+        } else if item.is_instance_of::<pyo3::types::PyFloat>() {
+            saw_number = true;
+            let value: f64 = item.extract()?;
+            if !value.is_finite() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "numeric allowed values must be finite",
+                ));
+            }
+            numeric.push(value);
+        } else {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "is_in supports lists of strings, numbers, or booleans",
+            ));
+        }
+        if saw_string && saw_number {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "allowed list must contain only strings or only numbers/booleans",
+            ));
+        }
+    }
+    Ok(PyCheck {
+        inner: if saw_string {
+            CheckType::OneOfString(strings)
+        } else {
+            CheckType::OneOfNumeric(numeric)
+        },
     })
 }
 
@@ -174,13 +253,46 @@ fn matches_check(pattern: String) -> PyResult<PyCheck> {
 }
 
 #[pyfunction(name = "one_of")]
-fn one_of(allowed: Vec<String>) -> PyResult<PyCheck> {
+fn one_of(allowed: &Bound<'_, PyList>) -> PyResult<PyCheck> {
     is_in(allowed)
 }
 
 #[pyfunction(name = "unique")]
 fn unique() -> PyResult<PyCheck> {
     unique_values()
+}
+
+#[pyfunction]
+fn str_length_between(min_len: usize, max_len: usize) -> PyResult<PyCheck> {
+    if min_len > max_len {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "min_len must be <= max_len",
+        ));
+    }
+    Ok(PyCheck {
+        inner: CheckType::StrLengthBetween(min_len, max_len),
+    })
+}
+
+#[pyfunction]
+fn not_blank() -> PyResult<PyCheck> {
+    Ok(PyCheck {
+        inner: CheckType::NotBlank,
+    })
+}
+
+#[pyfunction]
+fn starts_with(prefix: String) -> PyResult<PyCheck> {
+    Ok(PyCheck {
+        inner: CheckType::StartsWith(prefix),
+    })
+}
+
+#[pyfunction]
+fn ends_with(suffix: String) -> PyResult<PyCheck> {
+    Ok(PyCheck {
+        inner: CheckType::EndsWith(suffix),
+    })
 }
 
 #[pyfunction]
@@ -219,6 +331,28 @@ enum TableCheckType {
     UniqueTogether {
         columns: Vec<String>,
     },
+    Ordered {
+        columns: Vec<String>,
+        strict: bool,
+    },
+    SumColumns {
+        addends: Vec<String>,
+        target: String,
+        tolerance: Option<f64>,
+    },
+    Implies {
+        left: String,
+        by: String,
+    },
+    Determines {
+        a: String,
+        b: String,
+    },
+    Within {
+        left: String,
+        right: String,
+        max_gap_ns: i64,
+    },
 }
 
 #[pyclass(module = "framelaw", name = "DataFrameCheck", from_py_object)]
@@ -236,6 +370,29 @@ impl PyDataFrameCheck {
             DataFrameCheckSpec::UniqueTogether { columns } => {
                 TableCheckType::UniqueTogether { columns }
             }
+            DataFrameCheckSpec::Ordered { columns, strict } => {
+                TableCheckType::Ordered { columns, strict }
+            }
+            DataFrameCheckSpec::SumColumns {
+                addends,
+                target,
+                tolerance,
+            } => TableCheckType::SumColumns {
+                addends,
+                target,
+                tolerance,
+            },
+            DataFrameCheckSpec::Implies { left, by } => TableCheckType::Implies { left, by },
+            DataFrameCheckSpec::Determines { a, b } => TableCheckType::Determines { a, b },
+            DataFrameCheckSpec::Within {
+                left,
+                right,
+                max_gap_ns,
+            } => TableCheckType::Within {
+                left,
+                right,
+                max_gap_ns,
+            },
         };
         Self { inner }
     }
@@ -246,6 +403,27 @@ impl PyDataFrameCheck {
                 Box::new(ColumnComparison { left, op, right })
             }
             TableCheckType::UniqueTogether { columns } => Box::new(UniqueTogether { columns }),
+            TableCheckType::Ordered { columns, strict } => Box::new(Ordered { columns, strict }),
+            TableCheckType::SumColumns {
+                addends,
+                target,
+                tolerance,
+            } => Box::new(SumColumns {
+                addends,
+                target,
+                tolerance,
+            }),
+            TableCheckType::Implies { left, by } => Box::new(Implies { left, by }),
+            TableCheckType::Determines { a, b } => Box::new(Determines { a, b }),
+            TableCheckType::Within {
+                left,
+                right,
+                max_gap_ns,
+            } => Box::new(Within {
+                left,
+                right,
+                max_gap_ns,
+            }),
         }
     }
 }
@@ -300,6 +478,119 @@ fn unique_together(columns: Vec<String>) -> PyResult<PyDataFrameCheck> {
     }
     Ok(PyDataFrameCheck {
         inner: TableCheckType::UniqueTogether { columns },
+    })
+}
+
+#[pyfunction]
+fn ordered(columns: Vec<String>, strict: bool) -> PyResult<PyDataFrameCheck> {
+    if columns.len() < 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ordered needs at least two columns",
+        ));
+    }
+    if columns.iter().any(|name| name.is_empty()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ordered column names must not be empty",
+        ));
+    }
+    let mut deduped = columns.clone();
+    deduped.sort_unstable();
+    deduped.dedup();
+    if deduped.len() != columns.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ordered column names must be distinct",
+        ));
+    }
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::Ordered { columns, strict },
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (addends, target, tolerance = None))]
+fn sum_columns(
+    addends: Vec<String>,
+    target: String,
+    tolerance: Option<f64>,
+) -> PyResult<PyDataFrameCheck> {
+    if addends.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "sum_columns needs at least one addend",
+        ));
+    }
+    if let Some(tolerance) = tolerance {
+        if !(0.0..=f64::INFINITY).contains(&tolerance) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tolerance must be a non-negative finite number",
+            ));
+        }
+    }
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::SumColumns {
+            addends,
+            target,
+            tolerance,
+        },
+    })
+}
+
+#[pyfunction]
+fn implies(left: String, by: String) -> PyResult<PyDataFrameCheck> {
+    if left == by {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "implies needs two different columns",
+        ));
+    }
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::Implies { left, by },
+    })
+}
+
+#[pyfunction]
+fn determines(a: String, b: String) -> PyResult<PyDataFrameCheck> {
+    if a == b {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "determines needs two different columns",
+        ));
+    }
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::Determines { a, b },
+    })
+}
+
+/// Builds the per-row temporal gap bound from a Python `timedelta`.
+/// Resolution is microseconds, scaled up to nanoseconds; the bound is
+/// interpreted against the shared dtype's time unit by the core.
+fn timedelta_gap_ns(max_gap: &Bound<'_, PyDelta>) -> PyResult<i64> {
+    let days = max_gap.getattr("days")?.extract::<i64>()?;
+    let seconds = max_gap.getattr("seconds")?.extract::<i64>()?;
+    let microseconds = max_gap.getattr("microseconds")?.extract::<i64>()?;
+    let nanoseconds = days
+        .checked_mul(86_400_000_000_000)
+        .and_then(|n| n.checked_add(seconds * 1_000_000_000))
+        .and_then(|n| n.checked_add(microseconds * 1_000));
+    match nanoseconds {
+        Some(ns) => Ok(ns),
+        None => Err(pyo3::exceptions::PyValueError::new_err(
+            "max_gap exceeds the storable nanosecond range",
+        )),
+    }
+}
+
+#[pyfunction]
+fn within(left: String, right: String, max_gap: &Bound<'_, PyDelta>) -> PyResult<PyDataFrameCheck> {
+    if left == right {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "within needs two different columns",
+        ));
+    }
+    let max_gap_ns = timedelta_gap_ns(max_gap)?;
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::Within {
+            left,
+            right,
+            max_gap_ns,
+        },
     })
 }
 
@@ -381,6 +672,20 @@ enum JsonCheck {
     OneOf {
         values: Vec<String>,
     },
+    OneOfNumeric {
+        values: Vec<f64>,
+    },
+    StrLengthBetween {
+        min: usize,
+        max: usize,
+    },
+    NotBlank,
+    StartsWith {
+        prefix: String,
+    },
+    EndsWith {
+        suffix: String,
+    },
     ListLenBetween {
         min_len: usize,
         max_len: usize,
@@ -392,7 +697,7 @@ enum JsonCheck {
     },
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 enum JsonTableCheck {
     ColumnComparison {
@@ -402,6 +707,29 @@ enum JsonTableCheck {
     },
     UniqueTogether {
         columns: Vec<String>,
+    },
+    Ordered {
+        columns: Vec<String>,
+        strict: bool,
+    },
+    SumColumns {
+        addends: Vec<String>,
+        target: String,
+        #[serde(default)]
+        tolerance: Option<f64>,
+    },
+    Implies {
+        left: String,
+        by: String,
+    },
+    Determines {
+        a: String,
+        b: String,
+    },
+    Within {
+        left: String,
+        right: String,
+        max_gap_ns: i64,
     },
 }
 
@@ -658,7 +986,7 @@ impl PySchema {
                         .extract::<Vec<String>>()?;
                     (
                         PyDataType(polars::prelude::DataType::String),
-                        vec![is_in(expected)?],
+                        vec![is_in_strings(expected)?],
                     )
                 }
                 other => {
@@ -1043,6 +1371,22 @@ impl PySchema {
                 values.sort_unstable();
                 JsonCheck::OneOf { values }
             }
+            CheckType::OneOfNumeric(values) => {
+                let mut values = values.clone();
+                values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+                JsonCheck::OneOfNumeric { values }
+            }
+            CheckType::StrLengthBetween(min, max) => JsonCheck::StrLengthBetween {
+                min: *min,
+                max: *max,
+            },
+            CheckType::NotBlank => JsonCheck::NotBlank,
+            CheckType::StartsWith(prefix) => JsonCheck::StartsWith {
+                prefix: prefix.clone(),
+            },
+            CheckType::EndsWith(suffix) => JsonCheck::EndsWith {
+                suffix: suffix.clone(),
+            },
             CheckType::ListLenBetween(min_len, max_len) => JsonCheck::ListLenBetween {
                 min_len: *min_len,
                 max_len: *max_len,
@@ -1065,7 +1409,14 @@ impl PySchema {
             JsonCheck::LessThanOrEqual { value } => lte(value),
             JsonCheck::Between { min, max } => between(min, max),
             JsonCheck::Matches { pattern } => matches_regex(pattern),
-            JsonCheck::OneOf { values } => is_in(values),
+            JsonCheck::OneOf { values } => is_in_strings(values),
+            JsonCheck::OneOfNumeric { values } => Ok(PyCheck {
+                inner: CheckType::OneOfNumeric(values),
+            }),
+            JsonCheck::StrLengthBetween { min, max } => str_length_between(min, max),
+            JsonCheck::NotBlank => not_blank(),
+            JsonCheck::StartsWith { prefix } => starts_with(prefix),
+            JsonCheck::EndsWith { suffix } => ends_with(suffix),
             JsonCheck::ListLenBetween { min_len, max_len } => list_len_between(min_len, max_len),
             JsonCheck::ListNotEmpty => list_not_empty(),
             JsonCheck::StructField { field, checks } => {
@@ -1098,6 +1449,36 @@ impl PySchema {
             TableCheckType::UniqueTogether { columns } => JsonTableCheck::UniqueTogether {
                 columns: columns.clone(),
             },
+            TableCheckType::Ordered { columns, strict } => JsonTableCheck::Ordered {
+                columns: columns.clone(),
+                strict: *strict,
+            },
+            TableCheckType::SumColumns {
+                addends,
+                target,
+                tolerance,
+            } => JsonTableCheck::SumColumns {
+                addends: addends.clone(),
+                target: target.clone(),
+                tolerance: *tolerance,
+            },
+            TableCheckType::Implies { left, by } => JsonTableCheck::Implies {
+                left: left.clone(),
+                by: by.clone(),
+            },
+            TableCheckType::Determines { a, b } => JsonTableCheck::Determines {
+                a: a.clone(),
+                b: b.clone(),
+            },
+            TableCheckType::Within {
+                left,
+                right,
+                max_gap_ns,
+            } => JsonTableCheck::Within {
+                left: left.clone(),
+                right: right.clone(),
+                max_gap_ns: *max_gap_ns,
+            },
         }
     }
 
@@ -1115,6 +1496,25 @@ impl PySchema {
                 ))),
             },
             JsonTableCheck::UniqueTogether { columns } => unique_together(columns),
+            JsonTableCheck::Ordered { columns, strict } => ordered(columns, strict),
+            JsonTableCheck::SumColumns {
+                addends,
+                target,
+                tolerance,
+            } => sum_columns(addends, target, tolerance),
+            JsonTableCheck::Implies { left, by } => implies(left, by),
+            JsonTableCheck::Determines { a, b } => determines(a, b),
+            JsonTableCheck::Within {
+                left,
+                right,
+                max_gap_ns,
+            } => Ok(PyDataFrameCheck {
+                inner: TableCheckType::Within {
+                    left,
+                    right,
+                    max_gap_ns,
+                },
+            }),
         }
     }
 
@@ -1371,15 +1771,21 @@ impl PySchema {
         )
     }
 
-    #[pyo3(signature = (df, raise_on_error=None))]
+    #[pyo3(signature = (df, raise_on_error=None, chunk_rows=None))]
     fn validate(
         &self,
         py: Python<'_>,
         df: &Bound<'_, PyAny>,
         raise_on_error: Option<bool>,
+        chunk_rows: Option<u64>,
     ) -> PyResult<Option<PyValidationReport>> {
-        let raise = raise_on_error.unwrap_or(!self.lazy);
         let rust_schema = self.core_schema(py)?;
+
+        if let Some(chunk_rows) = chunk_rows {
+            return validate_chunked(py, df, &rust_schema, chunk_rows);
+        }
+
+        let raise = raise_on_error.unwrap_or(!self.lazy);
         let polars_df = materialize_frame(df)?;
         let report = rust_schema.validate(&polars_df);
 
@@ -1441,6 +1847,56 @@ impl PyColumnRef {
     }
 }
 
+/// Validates the frame in batches of `chunk_rows` rows. Each batch is
+/// re-validated with the GIL released, and error row indices are shifted
+/// back to absolute frame positions. Chunked validation always reports
+/// instead of raising; note that dataset-wide checks (unique, joint table
+/// checks) only see one chunk at a time.
+fn validate_chunked(
+    py: Python<'_>,
+    df: &Bound<'_, PyAny>,
+    rust_schema: &Schema,
+    chunk_rows: u64,
+) -> PyResult<Option<PyValidationReport>> {
+    if chunk_rows == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "chunk_rows must be at least 1",
+        ));
+    }
+    let mut errors: Vec<framelaw_core::errors::ValidationError> = Vec::new();
+    let mut offset: u64 = 0;
+    loop {
+        let sliced = df.call_method1("slice", (offset as isize, chunk_rows as isize))?;
+        let batch = if sliced.hasattr("collect")? {
+            sliced.call_method0("collect")?
+        } else {
+            sliced
+        };
+        let chunk = batch.extract::<PyDataFrame>()?;
+        let height = chunk.0.height() as u64;
+        if height == 0 {
+            break;
+        }
+        let chunk_report = py.detach(|| rust_schema.validate(&chunk.0));
+        for mut error in chunk_report.errors {
+            for row in &mut error.rows {
+                *row += offset as usize;
+            }
+            errors.push(error);
+        }
+        offset += height;
+        if height < chunk_rows {
+            break;
+        }
+    }
+    let report = framelaw_core::errors::ValidationReport { errors };
+    if report.is_valid() {
+        Ok(None)
+    } else {
+        Ok(Some(PyValidationReport::from(report)))
+    }
+}
+
 #[pyfunction]
 fn infer_schema(py: Python<'_>, df: &Bound<'_, PyAny>) -> PyResult<PySchema> {
     let dataframe = materialize_frame(df)?;
@@ -1495,6 +1951,10 @@ fn _framelaw(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(matches_check, m)?)?;
     m.add_function(wrap_pyfunction!(one_of, m)?)?;
     m.add_function(wrap_pyfunction!(unique, m)?)?;
+    m.add_function(wrap_pyfunction!(str_length_between, m)?)?;
+    m.add_function(wrap_pyfunction!(not_blank, m)?)?;
+    m.add_function(wrap_pyfunction!(starts_with, m)?)?;
+    m.add_function(wrap_pyfunction!(ends_with, m)?)?;
     m.add_function(wrap_pyfunction!(list_len_between, m)?)?;
     m.add_function(wrap_pyfunction!(list_not_empty, m)?)?;
     m.add_function(wrap_pyfunction!(struct_field, m)?)?;
@@ -1505,6 +1965,11 @@ fn _framelaw(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eq_columns, m)?)?;
     m.add_function(wrap_pyfunction!(ne_columns, m)?)?;
     m.add_function(wrap_pyfunction!(unique_together, m)?)?;
+    m.add_function(wrap_pyfunction!(ordered, m)?)?;
+    m.add_function(wrap_pyfunction!(sum_columns, m)?)?;
+    m.add_function(wrap_pyfunction!(implies, m)?)?;
+    m.add_function(wrap_pyfunction!(determines, m)?)?;
+    m.add_function(wrap_pyfunction!(within, m)?)?;
     m.add_function(wrap_pyfunction!(infer_schema, m)?)?;
     m.add_function(wrap_pyfunction!(sample_function, m)?)?;
 

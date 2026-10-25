@@ -3,7 +3,53 @@
 All notable changes to Framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.1]
+## [0.2.0] — 2026-10-25
+
+### Python API
+
+- `framelaw.str_length_between(min_len, max_len)` bounds non-null string
+  values by character length.
+- `framelaw.not_blank()` rejects empty and whitespace-only strings.
+- `framelaw.starts_with(prefix)` / `framelaw.ends_with(suffix)` pin string
+  affixes.
+- `framelaw.one_of(values)` / `framelaw.is_in(values)` now accept numeric and
+  boolean membership in addition to strings; integer rows are compared
+  exactly beyond the 2^53 float range.
+- `Schema.validate(data, chunk_rows=n)` validates large `DataFrame` or
+  `LazyFrame` inputs in batches: lazy slices and collect per batch, batch
+  validation with the GIL released, absolute row indices in reports, and
+  a never-raising report result (carry-over caveat: dataset-wide checks
+  such as `unique` only see one chunk at a time).
+
+### Table checks
+
+- Five new cross-column checks validate whole rows across columns:
+  `framelaw.ordered(columns, strict)` (per-row chain ordering),
+  `framelaw.sum_columns(addends, target, tolerance=None)` (per-row sums,
+  exact for integers, tolerant for floats),
+  `framelaw.implies(left, by)` (presence implication),
+  `framelaw.determines(a, b)` (functional dependency), and
+  `framelaw.within(left, right, max_gap)` (temporal gap bound from a
+  `datetime.timedelta`).
+- All five persist through JSON schema round-trips, and `sample` generates
+  data satisfying them (unsatisfiable schemas error honestly).
+
+### Inference
+
+- `infer_schema` now emits observed min/max bounds for temporal columns in
+  their tick unit (days for `Date`, the unit ticks for `Datetime`/
+  `Duration`, nanoseconds for `Time`), and `sample` stays inside them.
+
+### Data generation
+
+- `sample` honors all new checks, including string constraints and numeric
+  membership, and reports unsatisfiable combinations (e.g. a fractional
+  `one_of` on an integer column, a temporal `one_of`) as errors.
+- Nesting is no longer capped at one level: `List`, `Array`, and `Struct`
+  generate at any depth (empty nested cells keep their dtype), and empty
+  `List` cells no longer degrade the inferred inner dtype.
+
+## [0.1.1] - 2026-10-23
 
 ### Python API
 
@@ -18,7 +64,7 @@ All notable changes to Framelaw are documented here. The format follows
   wheel per platform supports CPython 3.10 and newer, replacing the
   per-interpreter wheels.
 
-## [0.1.0] — First release
+## [0.1.0] — 2026-10-23
 
 Polars-native DataFrame validation in Rust, exposed to Python via PyO3.
 Validation runs directly on Polars' columnar memory with Rayon parallelism

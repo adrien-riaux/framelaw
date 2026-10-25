@@ -58,7 +58,8 @@ Opaque value returned by the table-check constructors. Pass via
 `Schema(..., dataframe_checks=[...])`.
 
 Table-check constructors: `gt_column`, `lt_column`, `gte_column`,
-`lte_column`, `eq_columns`, `ne_columns`, `unique_together`.
+`lte_column`, `eq_columns`, `ne_columns`, `unique_together`, `ordered`,
+`sum_columns`, `implies`, `determines`, `within`.
 
 ### `ValidationReport`
 
@@ -103,7 +104,10 @@ Table-check constructors: `gt_column`, `lt_column`, `gte_column`,
 | `gt(value)` / `lt(value)` / `gte(value)` / `lte(value)` | `float` threshold |
 | `between(min, max)` | inclusive `float` bounds |
 | `matches_regex(pattern)` / `matches(pattern)` | regex `str` (validated at construction) |
-| `is_in(allowed)` / `one_of(allowed)` | `list[str]` |
+| `str_length_between(min_len, max_len)` | inclusive `int` bounds, `min_len <= max_len` |
+| `not_blank()` | — |
+| `starts_with(prefix)` / `ends_with(suffix)` | `str` prefix / suffix |
+| `is_in(allowed)` / `one_of(allowed)` | `list[str]` (string membership) or `list[int | float | bool]` (numeric membership) |
 | `list_len_between(min_len, max_len)` | `int` bounds, `min_len <= max_len` |
 | `list_not_empty()` | — |
 | `struct_field(field, checks)` | field name + list of checks |
@@ -115,4 +119,7 @@ Table-check constructors: `gt_column`, `lt_column`, `gte_column`,
 | `gt_column(left, right)` / `lt_column(left, right)` | column names, must differ |
 | `gte_column(left, right)` / `lte_column(left, right)` | column names, must differ |
 | `eq_columns(left, right)` / `ne_columns(left, right)` | column names, must differ |
-| `unique_together(columns)` | ≥ 2 column names |
+| `ordered(columns, strict)` | ≥ 2 distinct column names |
+| `sum_columns(addends, target, tolerance=None)` | ≥ 1 addend, `tolerance >= 0` |
+| `implies(left, by)` / `determines(a, b)` | column names, must differ |
+| `within(left, right, max_gap)` | column names, must differ; `max_gap` is a `timedelta` |

@@ -1,4 +1,4 @@
-"""Framelaw v0.2 example: cross-column checks and nested types."""
+"""Framelaw example: cross-column checks and nested types."""
 
 import polars as pl
 from framelaw import (
