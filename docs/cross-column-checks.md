@@ -17,6 +17,15 @@ schema = fl.Schema(
         fl.checks.table.unique_together(["country", "city"]),
     ],
 )
+
+df = pl.DataFrame(
+    {
+        "start": [2],
+        "end": [1],
+        "country": ["FR"],
+        "city": ["Paris"],
+    }
+)
 ```
 
 ## Comparisons
@@ -58,7 +67,9 @@ fl.checks.table.unique_together(["country", "city"])
 ```
 
 Fails when the same combination appears in more than one row; all rows in
-each duplicated group are reported. Needs at least two columns.
+each duplicated group are reported. Nulls participate in the duplicate scan,
+so repeated null combinations count as duplicates. Needs at least two
+columns.
 
 ## Chain ordering across columns
 

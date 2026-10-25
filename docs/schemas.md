@@ -13,16 +13,16 @@ schema = fl.Schema(
     {
         "user_id": fl.Column(pl.Int64, nullable=False, checks=[fl.checks.column.unique()]),
         "age": fl.Column(pl.Int32, nullable=False, checks=[fl.checks.column.gt(0), fl.checks.column.lt(120)]),
+        "email": fl.Column(pl.String, checks=[fl.checks.column.matches(r".+@.+\..+")]),
         "score": fl.Column(pl.Float64, checks=[fl.checks.column.between(0.0, 1.0)]),
     },
-    dataframe_checks=[fl.checks.table.lt_column("start", "end")],  # optional
     lazy=False,  # optional, see Lazy validation
 )
 ```
 
 Constructor signature:
 
-```python
+```text
 Schema(columns, dataframe_checks=None, lazy=False)
 ```
 
@@ -34,7 +34,7 @@ Schema(columns, dataframe_checks=None, lazy=False)
 
 ## Columns
 
-```python
+```text
 Column(dtype, nullable=True, checks=None)
 ```
 
@@ -60,6 +60,21 @@ after [inference](inference.md): infer a draft, then tighten it.
 ## Validating
 
 ```python
+df = pl.DataFrame(
+    {
+        "user_id": [1],
+        "age": [30],
+        "email": ["a@example.com"],
+        "score": [0.5],
+    },
+    schema={
+        "user_id": pl.Int64,
+        "age": pl.Int32,
+        "email": pl.String,
+        "score": pl.Float64,
+    },
+)
+
 schema.validate(df)                        # None if valid, else raises ValueError
 schema.validate(df, raise_on_error=False)  # None if valid, else ValidationReport
 schema.validate_lazy(df)                   # never raises: None or ValidationReport
@@ -71,11 +86,14 @@ collected internally before validation.
 ## Alternative constructors
 
 ```python
-Schema.from_polars_schema({"age": pl.Int64, "email": pl.String})
-Schema.from_pydantic(UserModel)   # see Pydantic integration
-Schema.from_json(payload)         # see Serialization
-fl.infer_schema(df)               # see Schema inference
+typed = fl.Schema.from_polars_schema({"age": pl.Int64, "email": pl.String})
 ```
+
+Other constructors are covered in their own guides:
+
+- `fl.Schema.from_pydantic(Model)` — [Pydantic integration](pydantic.md).
+- `fl.Schema.from_json(payload)` — [Serialization](serialization.md).
+- `fl.infer_schema(df)` — [Schema inference](inference.md).
 
 ## Sampling test data
 

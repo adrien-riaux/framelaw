@@ -5,6 +5,17 @@ handy for storing contracts alongside pipelines or sharing them between
 services.
 
 ```python
+import polars as pl
+import framelaw as fl
+
+schema = fl.Schema(
+    {
+        "id": fl.Column(pl.Int64, nullable=False),
+        "score": fl.Column(pl.Float64, checks=[fl.checks.column.between(0.0, 1.0)]),
+    }
+)
+df = pl.DataFrame({"id": [1, 2], "score": [0.25, 0.75]})
+
 payload = schema.to_json()
 restored = fl.Schema.from_json(payload)
 assert restored.validate(df) is None

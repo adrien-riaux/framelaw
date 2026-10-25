@@ -5,12 +5,22 @@ scripts, awkward for pipelines that want to inspect, log, or branch on
 failures. Lazy mode returns reports instead. For large frames, `chunk_rows`
 validates in batches (see [Chunked validation](#chunked-validation)).
 
+```python
+import polars as pl
+import framelaw as fl
+
+schema = fl.Schema(
+    {"id": fl.Column(pl.Int64, nullable=False)},
+)
+df = pl.DataFrame({"id": [1, None, 3]})
+```
+
 ## Per-call lazy validation
 
 ```python
 report = schema.validate(df, raise_on_error=False)
-if not report.is_valid():
-    log(report.summary())
+if report is not None and not report.is_valid():
+    print(report.summary())
 ```
 
 `validate_lazy()` is a shorthand that never raises, regardless of settings:
@@ -25,11 +35,17 @@ Pass `lazy=True` to flip the default for that schema. Explicit
 `raise_on_error` still wins per call:
 
 ```python
-schema = fl.Schema({...}, lazy=True)
+schema = fl.Schema(
+    {"id": fl.Column(pl.Int64, nullable=False)},
+    lazy=True,
+)
 
-schema.validate(df)                     # report, never raises
-schema.validate(df, raise_on_error=True)  # raises again for this call
-schema.lazy                             # True
+schema.validate(df)  # report, never raises
+try:
+    schema.validate(df, raise_on_error=True)  # raises again for this call
+except ValueError as err:
+    print(err)
+schema.lazy  # True
 ```
 
 The flag persists through `to_json()` / `from_json()`.
@@ -38,7 +54,11 @@ The flag persists through `to_json()` / `from_json()`.
 
 ```python
 report = schema.validate_lazy(df)
-report.raise_if_invalid()  # ValueError with the summary, or None if valid
+if report is not None:
+    try:
+        report.raise_if_invalid()  # ValueError with the summary
+    except ValueError as err:
+        print(err)
 ```
 
 This makes the common pipeline shape explicit: validate lazily everywhere,

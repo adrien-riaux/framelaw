@@ -43,8 +43,10 @@ Python reflection overhead.
 Unsupported field types (e.g. `dict`, nested models) raise `TypeError`
 rather than silently producing a weaker schema.
 
-> `min_length`/`max_length` on `str` fields are currently ignored (there is
-> no string-length check yet); they only take effect on `list` fields.
+> `min_length`/`max_length` on `str` fields are currently ignored by
+> `from_pydantic`; they only take effect on `list` fields. Add a string-length
+> check explicitly when you need one:
+> `schema["email"].add_check(fl.checks.column.str_length_between(3, 254))`.
 
 > FrameLaw targets Pydantic v2 only; models must expose
 > `__pydantic_core_schema__`.

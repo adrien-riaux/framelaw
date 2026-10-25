@@ -1,21 +1,48 @@
 [project]
 name = "framelaw"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.10"
-description = "Native Rust schema contracts, built for Polars"
+description = "Native Rust schema validation for Polars DataFrames"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Adrien Riaux", email = "adrien.riaux@efrei.net" },
+]
+keywords = [
+    "polars",
+    "dataframe",
+    "validation",
+    "schema",
+    "pydantic",
+    "rust",
+]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+    "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
     "polars>=1.0",
     "pydantic>=2.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/adrien-riaux/framelaw"
+Documentation = "https://adrien-riaux.github.io/framelaw/"
+Repository = "https://github.com/adrien-riaux/framelaw"
+Issues = "https://github.com/adrien-riaux/framelaw/issues"
+Changelog = "https://github.com/adrien-riaux/framelaw/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -23,12 +50,13 @@ dev = [
     "ruff>=0.4",
     "interrogate>=1.7",
     "ty",
-    "maturin>=1.5"
+    "maturin>=1.9"
 ]
 
 [tool.maturin]
 python-source = "python"
 module-name = "framelaw._framelaw"
+exclude = ["**/__pycache__/**", "**/*.pyc"]
 
 [tool.ruff]
 line-length = 100
@@ -62,5 +90,5 @@ quiet = false
 color = true
 
 [build-system]
-requires = ["maturin>=1.5"]
+requires = ["maturin>=1.9"]
 build-backend = "maturin"

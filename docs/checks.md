@@ -24,7 +24,8 @@ the rows. Adding `fl.checks.column.not_null()` explicitly is equivalent and is w
 |---|---|
 | `fl.checks.column.unique_values()` (`fl.checks.column.unique()`) | any duplicated value exists |
 
-All rows sharing a duplicated value are reported.
+All rows sharing a duplicated value are reported. Nulls participate in the
+duplicate scan, so multiple nulls in a nullable column count as duplicates.
 
 ## Numeric comparisons
 

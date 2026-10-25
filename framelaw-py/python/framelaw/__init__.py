@@ -47,6 +47,7 @@ from ._compat import (
 from ._framelaw import (
     Check,
     Column,
+    ColumnRef,
     DataFrameCheck,
     Schema,
     ValidationError,
@@ -64,6 +65,7 @@ __all__ = [
     "__version__",
     "Check",
     "Column",
+    "ColumnRef",
     "DataFrameCheck",
     "Schema",
     "ValidationError",

@@ -3,6 +3,12 @@
 **The law your DataFrames must obey.** Native Rust schema contracts, built for
 Polars, exposed to Python.
 
+[![PyPI](https://img.shields.io/pypi/v/framelaw.svg)](https://pypi.org/project/framelaw/)
+[![Python versions](https://img.shields.io/pypi/pyversions/framelaw.svg)](https://pypi.org/project/framelaw/)
+[![CI](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-live-blue)](https://adrien-riaux.github.io/framelaw/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/adrien-riaux/framelaw/blob/main/LICENSE)
+
 FrameLaw validates Polars `DataFrame`s against a schema — column types,
 nullability, value constraints, and cross-column rules — in parallel Rust,
 behind a Pandera-like Python API. On a 2M-row mixed workload it validates at
@@ -57,7 +63,7 @@ df = pl.DataFrame(
 )
 
 report = schema.validate(df, raise_on_error=False)
-if not report.is_valid():
+if report is not None and not report.is_valid():
     print(report.summary())
 ```
 
@@ -69,10 +75,20 @@ Column 'country': rows [2], check 'OneOfString': Values in 'country' are not par
 
 ## Documentation
 
-Full docs live in [`docs/`](docs/README.md): quickstart, schemas, every
-check, cross-column and nested validation, error reports, inference, lazy
-mode, data generation, Pydantic and Polars integration, serialization, API
-reference, and architecture notes.
+Full documentation is published at
+**[adrien-riaux.github.io/framelaw](https://adrien-riaux.github.io/framelaw/)**.
+It covers the quickstart, schemas, every check, cross-column and nested
+validation, error reports, inference, lazy mode, data generation, Pydantic and
+Polars integration, serialization, and the generated API reference.
+
+The sources live in [`docs/`](docs/index.md) and are built with MkDocs
+Material. To preview them locally:
+
+```bash
+make docs-serve   # http://127.0.0.1:8000
+make docs-build   # strict build into ./site
+make docs-check   # strict build + execute runnable snippets
+```
 
 ## Development
 
@@ -81,6 +97,7 @@ make build     # editable debug install
 make test      # Rust + Python suites
 make lint      # clippy, ruff, ty, interrogate
 make scripts   # smoke-test every script
+make docs-build # strict docs build
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full contributor workflow.

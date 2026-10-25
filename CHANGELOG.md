@@ -12,6 +12,8 @@ All notable changes to Framelaw are documented here. The format follows
   (`fl.checks.column.gt(0)`) and cross-column checks in
   `framelaw.checks.table` (`fl.checks.table.lt_column("start", "end")`).
   `infer_schema` and `sample` remain top-level.
+- Exported `ColumnRef` from the top-level package so `schema[name]` references
+  can be annotated without importing the private native module.
 
 ### Deprecations
 
@@ -19,6 +21,25 @@ All notable changes to Framelaw are documented here. The format follows
   ...) still work but emit `DeprecationWarning` and will be removed in a
   future release. Migrate to `framelaw.checks.column` /
   `framelaw.checks.table`.
+
+### Documentation
+
+- Added a MkDocs Material documentation site with grouped navigation, a
+  landing page, installation and migration guides, recipes, an FAQ, and a
+  benchmarks page. The site is deployed to GitHub Pages from `main`.
+- Added a generated API reference (mkdocstrings) backed by Google-style
+  docstrings in `_framelaw.pyi`, covering `Schema`, `Column`, both check
+  namespaces, reports, and top-level functions.
+- Documented the `framelaw.checks` migration, chunked-validation caveats, and
+  the current Pydantic string-length limitation.
+
+### Packaging
+
+- The PyPI page now carries a real description (`framelaw-py/README.md`),
+  project URLs, author, license, keywords, and richer classifiers.
+- Added the `py.typed` marker so type checkers recognize the bundled stub.
+- Added PEP 639 license metadata and included the MIT license in wheels and
+  sdists.
 
 ## [0.2.0] — 2026-10-25
 

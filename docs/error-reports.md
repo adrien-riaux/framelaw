@@ -6,12 +6,23 @@ which columns, which check, which rows, and a human-readable message.
 ## The report object
 
 ```python
+import polars as pl
+import framelaw as fl
+
+schema = fl.Schema(
+    {
+        "age": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)]),
+        "email": fl.Column(pl.String, checks=[fl.checks.column.matches(r".+@.+\..+")]),
+    }
+)
+df = pl.DataFrame({"age": [30, -1], "email": ["a@example.com", "nope"]})
+
 report = schema.validate(df, raise_on_error=False)
 report.is_valid()       # bool
 report.summary()        # multi-line human-readable string
 report.errors           # list of ValidationError
 report.to_dataframe()   # Polars DataFrame, one row per failing cell
-report.raise_if_invalid()  # re-raise as ValueError, or None if valid
+# report.raise_if_invalid()  # raises ValueError with the summary
 ```
 
 `validate()` returns `None` when the frame is valid — so `report is None`
