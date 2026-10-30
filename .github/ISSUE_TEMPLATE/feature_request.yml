@@ -1,0 +1,56 @@
+name: Feature request
+description: Suggest a new check, an API improvement, or a documentation change.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Framelaw. Please describe the problem before
+        the solution so the use case is clear.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or motivation
+      description: What are you trying to do, and what is missing or awkward today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the API you would like. A short code sketch helps.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you tried, or other designs you considered.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      description: Which parts of the project would this touch?
+      options:
+        - label: Python API
+        - label: Single-column check
+        - label: Cross-column or table check
+        - label: Schema serialization
+        - label: Documentation
+        - label: Performance
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Related issues, datasets, or references.
+    validations:
+      required: false

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://adrien-riaux.github.io/framelaw/
+    about: Guides, API reference, recipes, and the FAQ.
+  - name: PyPI package
+    url: https://pypi.org/project/framelaw/
+    about: Installation instructions and release history.

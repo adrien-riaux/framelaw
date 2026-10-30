@@ -10,14 +10,14 @@ env:
 jobs:
   gate:
     name: Pre-publish gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: astral-sh/setup-uv@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Rust formatting
@@ -46,22 +46,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             arch: x86_64
           - os: ubuntu-24.04-arm
             arch: aarch64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           command: build
           manylinux: auto
           args: --release --locked --out dist --manifest-path framelaw-py/Cargo.toml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-linux-${{ matrix.arch }}
           path: dist/
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Smoke-test wheel
@@ -80,7 +80,7 @@ jobs:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -89,12 +89,12 @@ jobs:
           command: build
           target: ${{ matrix.target }}
           args: --release --locked --out dist --manifest-path framelaw-py/Cargo.toml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-macos-${{ matrix.target }}
           path: dist/
       # Only the arm64 wheel is runnable on the arm64 runner.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: matrix.target == 'aarch64-apple-darwin'
         with:
           python-version: "3.12"
@@ -111,7 +111,7 @@ jobs:
     needs: [gate]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -120,11 +120,11 @@ jobs:
           command: build
           target: x86_64-pc-windows-msvc
           args: --release --locked --out dist --manifest-path framelaw-py/Cargo.toml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-windows-x86_64
           path: dist/
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Smoke-test wheel
@@ -137,14 +137,14 @@ jobs:
   build-sdist:
     name: sdist
     needs: [gate]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --out dist --manifest-path framelaw-py/Cargo.toml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-sdist
           path: dist/
@@ -153,11 +153,11 @@ jobs:
     name: Publish to TestPyPI
     if: contains(github.ref_name, '-rc.')
     needs: [build-linux, build-macos, build-windows, build-sdist]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           merge-multiple: true
@@ -171,15 +171,15 @@ jobs:
     name: Publish to PyPI
     if: ${{ !contains(github.ref_name, '-rc.') }}
     needs: [build-linux, build-macos, build-windows, build-sdist]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       id-token: write
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           merge-multiple: true

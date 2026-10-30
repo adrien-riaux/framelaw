@@ -2,21 +2,25 @@
 description: Native Rust schema validation for Polars DataFrames.
 ---
 
+<div class="hero" markdown>
+
 # Framelaw
+
+Validate Polars `DataFrame`s and `LazyFrame`s against a declarative schema —
+types, nullability, value checks, and cross-column rules — in parallel Rust,
+behind a small, Pandera-like Python API.
+
+[Get started](quickstart.md){ .md-button .md-button--primary }
+[API reference](reference/index.md){ .md-button }
+
+</div>
+
+<div class="hero-badges" markdown>
 
 [![PyPI](https://img.shields.io/pypi/v/framelaw.svg)](https://pypi.org/project/framelaw/)
 [![Python versions](https://img.shields.io/pypi/pyversions/framelaw.svg)](https://pypi.org/project/framelaw/)
 [![CI](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/adrien-riaux/framelaw/blob/main/LICENSE)
-
-<div class="hero" markdown>
-
-Framelaw validates Polars `DataFrame`s and `LazyFrame`s against a declarative
-schema — column types, nullability, value constraints, and cross-column rules
-— in parallel Rust, behind a small, Pandera-like Python API.
-
-[Get started](quickstart.md){ .md-button .md-button--primary }
-[API reference](reference/index.md){ .md-button }
 
 </div>
 

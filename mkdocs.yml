@@ -43,7 +43,6 @@ theme:
     - search.highlight
     - content.code.copy
     - content.code.annotate
-    - content.action.edit
     - toc.follow
   icon:
     repo: fontawesome/brands/github

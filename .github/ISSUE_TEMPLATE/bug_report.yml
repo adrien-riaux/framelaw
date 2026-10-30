@@ -1,0 +1,104 @@
+name: Bug report
+description: Report a crash, an incorrect validation result, or a packaging problem.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. A minimal reproduction is
+        the fastest path to a fix.
+
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and could not find a duplicate.
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: A self-contained Python snippet that reproduces the problem.
+      render: python
+      placeholder: |
+        import polars as pl
+        import framelaw as fl
+
+        schema = fl.Schema(...)
+        df = pl.DataFrame(...)
+        schema.validate(df)
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Traceback or validation report
+      description: Paste the full traceback or the output of `report.summary()`.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: framelaw-version
+    attributes:
+      label: Framelaw version
+      description: Output of `python -c "import framelaw as fl; print(fl.__version__)"`.
+      placeholder: "0.4.1"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.12"
+    validations:
+      required: true
+
+  - type: input
+    id: polars-version
+    attributes:
+      label: Polars version
+      placeholder: "1.30.0"
+    validations:
+      required: true
+
+  - type: input
+    id: pydantic-version
+    attributes:
+      label: Pydantic version
+      placeholder: "2.11.0"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that helps reproduce or diagnose the issue.
+    validations:
+      required: false
