@@ -5,6 +5,9 @@ can be attached to a :class:`framelaw.Schema` through ``dataframe_checks=[...]``
 """
 
 from .._framelaw import (
+    check_expr,
+    check_mask,
+    check_rows,
     determines,
     eq_columns,
     gt_column,
@@ -20,6 +23,9 @@ from .._framelaw import (
 )
 
 __all__ = [
+    "check_expr",
+    "check_mask",
+    "check_rows",
     "determines",
     "eq_columns",
     "gt_column",
