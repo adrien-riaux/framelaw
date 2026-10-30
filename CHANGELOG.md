@@ -3,6 +3,20 @@
 All notable changes to Framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.1] — 2026-10-31
+
+### Documentation
+
+- Added pull-request and issue templates.
+- Widened the documentation layout and refreshed the landing page with a
+  softer hero and pill-shaped action buttons.
+- Removed the unused "Edit this page" action from the site.
+
+### Changed
+
+- Updated GitHub Actions to Node 24-compatible majors and pinned runners to
+  `ubuntu-24.04` and `macos-15`, clearing deprecation warnings.
+
 ## [0.4.0] — 2026-10-30
 
 ### Python API
