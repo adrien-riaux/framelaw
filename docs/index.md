@@ -4,11 +4,9 @@ description: Native Rust schema validation for Polars DataFrames.
 
 # Framelaw
 
-**The law your DataFrames must obey.**
-
 [![PyPI](https://img.shields.io/pypi/v/framelaw.svg)](https://pypi.org/project/framelaw/)
 [![Python versions](https://img.shields.io/pypi/pyversions/framelaw.svg)](https://pypi.org/project/framelaw/)
-[![CI](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml)
+[![CI](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/adrien-riaux/framelaw/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/adrien-riaux/framelaw/blob/main/LICENSE)
 
 <div class="hero" markdown>

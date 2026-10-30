@@ -11,7 +11,8 @@ fl.Schema(
 ```
 
 See the [Cross-column checks guide](../cross-column-checks.md) for semantics,
-null handling, and serialization.
+null handling, and serialization, and the [Custom checks](../custom-checks.md)
+guide for user-defined predicates.
 
 ::: framelaw.DataFrameCheck
 
@@ -30,3 +31,6 @@ null handling, and serialization.
         - implies
         - determines
         - within
+        - check_expr
+        - check_mask
+        - check_rows

@@ -3,6 +3,32 @@
 All notable changes to Framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Python API
+
+- Added `fl.checks.table.check_expr(...)` and
+  `fl.checks.table.check_mask(...)` for user-defined table checks.
+  `check_expr` evaluates a vectorized Boolean Polars expression on all cores;
+  `check_mask` calls a Python function once per validation chunk and consumes
+  its Boolean mask. Custom failures carry their check name, attributed
+  columns, and a bounded row list (`max_reported_rows`).
+- Added `fl.checks.table.check_rows(...)` for row-wise Python predicates. The
+  callable receives one `dict` per row and is compiled to
+  `pl.struct(...).map_elements(...)`. It is the slowest custom tier
+  (single-core, roughly 0.1 µs/row for simple predicates) and is intended for
+  prototyping or genuinely row-shaped rules.
+- Chunked validation of a `LazyFrame` now streams through
+  `LazyFrame.collect_batches` instead of re-collecting every slice, so the
+  query runs once and peak memory stays proportional to `chunk_rows`.
+  `Schema.validate_lazy(...)` accepts `chunk_rows` too.
+- `Schema.to_json()` now raises `ValueError` for schemas containing custom
+  checks, since Python callables cannot be serialized.
+
+### Documentation
+
+- Added the [Custom checks](docs/custom-checks.md) guide.
+
 ## [0.3.1] — 2026-10-25
 
 ### Documentation

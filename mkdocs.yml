@@ -5,7 +5,6 @@ site_url: https://adrien-riaux.github.io/framelaw/
 copyright: Copyright &copy; 2026 Adrien Riaux
 repo_url: https://github.com/adrien-riaux/framelaw
 repo_name: adrien-riaux/framelaw
-edit_uri: edit/main/docs/
 docs_dir: docs
 strict: true
 
@@ -59,6 +58,7 @@ nav:
       - Schemas & columns: schemas.md
       - Checks: checks.md
       - Cross-column checks: cross-column-checks.md
+      - Custom checks: custom-checks.md
       - Nested types: nested-types.md
       - Error reports: error-reports.md
       - Lazy & chunked validation: lazy-validation.md

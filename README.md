@@ -22,6 +22,8 @@ behind a Pandera-like Python API. On a 2M-row mixed workload it validates at
   subfields.
 - **Cross-column checks**: `start < end`-style comparisons and
   multi-column uniqueness.
+- **Custom checks**: vectorized Polars expressions, batch Python callables, or
+  row-wise Python predicates for domain-specific rules.
 - **Schema inference**: draft a schema from trusted data, then tighten it.
 - **Lazy validation**: reports instead of exceptions, per call or per schema.
 - **Data generation**: sample valid, reproducible test rows from any schema.
