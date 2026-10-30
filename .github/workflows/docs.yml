@@ -42,7 +42,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
       - name: Build with MkDocs (strict)
         run: uvx --with-requirements docs/assets/requirements.txt mkdocs build --strict
       - name: Configure GitHub Pages
