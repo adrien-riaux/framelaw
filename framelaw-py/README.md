@@ -20,6 +20,8 @@ schema — column types, nullability, value constraints, and cross-column rules
 - **Cross-column checks**: comparisons, per-row ordering and sums,
   multi-column uniqueness, presence implications, functional dependencies,
   and temporal gaps.
+- **Custom checks**: vectorized Polars expressions, batch Python callables, or
+  row-wise Python predicates, with bounded failure reports.
 - **Structured failures** with the column(s), check name, failing row indices,
   and a message; convert a report to a Polars frame to quarantine rows.
 - **Schema inference** from trusted data, **Pydantic v2** derivation, and

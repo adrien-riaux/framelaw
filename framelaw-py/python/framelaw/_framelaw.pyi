@@ -129,7 +129,7 @@ class Schema:
 
         Args:
             df: The frame to validate. Lazy frames are collected at the
-                validation boundary, or sliced and collected per batch when
+                validation boundary, or streamed in batches when
                 ``chunk_rows`` is set.
             raise_on_error: Whether to raise ``ValueError`` on failure.
                 ``None`` resolves to ``not self.lazy``.
@@ -150,15 +150,23 @@ class Schema:
                 ``LazyFrame``.
         """
 
-    def validate_lazy(self, df: Any) -> ValidationReport | None:
+    def validate_lazy(self, df: Any, chunk_rows: int | None = None) -> ValidationReport | None:
         """Validate without ever raising.
 
         Args:
             df: Polars ``DataFrame`` or ``LazyFrame`` to validate.
+            chunk_rows: Validate in batches of this many rows. Lazy frames
+                are streamed through ``collect_batches``, so peak memory stays
+                proportional to the batch size. Dataset-wide checks
+                (``unique``, ``unique_together``, ``determines``) only see one
+                batch at a time.
 
         Returns:
             ``None`` when the frame is valid, otherwise a
             :class:`ValidationReport`.
+
+        Raises:
+            ValueError: If ``chunk_rows`` is zero.
         """
 
     def sample(self, n: int = 10, seed: int | None = None) -> Any:
@@ -498,6 +506,137 @@ def struct_field(field: str, checks: list[Check]) -> Check:
 
     Returns:
         A check that fails when the subfield fails any of ``checks``.
+    """
+
+def check_expr(
+    expr: Any,
+    name: str | None = None,
+    max_reported_rows: int = 1000,
+) -> DataFrameCheck:
+    """Build a vectorized custom table check from a Polars expression.
+
+    The expression (or a zero-argument callable returning one) is evaluated
+    with ``DataFrame.select``. It must produce exactly one Boolean column of
+    the same height as the validated frame. Rows where the predicate is
+    ``False`` fail; rows where it is null are skipped.
+
+    Expression checks run entirely in Polars, so they keep native speed and
+    use all available cores. Prefer them over :func:`check_mask` whenever the
+    rule can be expressed as a Polars expression.
+
+    Args:
+        expr: A ``polars.Expr`` predicate, or a zero-argument callable
+            returning one.
+        name: Check name reported in failures. Defaults to ``"CustomExpr"``.
+        max_reported_rows: Maximum number of failing row indices kept in the
+            report. The total failure count is always included in the
+            message.
+
+    Returns:
+        A table check that reports rows where the predicate is false.
+
+    Raises:
+        TypeError: If ``expr`` is not a Polars expression or a callable.
+        ValueError: If ``name`` is empty or ``max_reported_rows`` is zero.
+
+    Examples:
+        >>> import polars as pl
+        >>> import framelaw as fl
+        >>> check = fl.checks.table.check_expr(
+        ...     (pl.col("qty") * pl.col("price") - pl.col("total")).abs() <= 0.01,
+        ...     name="total_consistent",
+        ... )
+    """
+
+def check_mask(
+    func: Any,
+    columns: list[str] | None = None,
+    name: str | None = None,
+    max_reported_rows: int = 1000,
+) -> DataFrameCheck:
+    """Build a batch custom table check from a Python callable.
+
+    ``func`` receives one ``polars.DataFrame`` per validation chunk and must
+    return a Boolean ``polars.Series`` (or a sequence of booleans) with one
+    value per row. ``False`` fails, ``True`` passes, and nulls are skipped.
+    Exceptions raised by the callable propagate unchanged.
+
+    Use this for rules that cannot be expressed as a Polars expression. The
+    callable is invoked once per chunk, not once per row, so keep its body
+    vectorized (Polars or NumPy) and combine it with ``chunk_rows`` to bound
+    memory on large frames.
+
+    Args:
+        func: Callable taking one ``polars.DataFrame`` and returning a
+            Boolean mask.
+        columns: Column names attributed to failures in the report.
+        name: Check name reported in failures. Defaults to ``"CustomMask"``.
+        max_reported_rows: Maximum number of failing row indices kept in the
+            report. The total failure count is always included in the
+            message.
+
+    Returns:
+        A table check that reports rows where the mask is false.
+
+    Raises:
+        TypeError: If ``func`` is not callable.
+        ValueError: If ``name`` is empty or ``max_reported_rows`` is zero.
+
+    Examples:
+        >>> import polars as pl
+        >>> import framelaw as fl
+        >>> check = fl.checks.table.check_mask(
+        ...     lambda df: df["qty"].is_between(1, 500) & (df["price"] > 0),
+        ...     columns=["qty", "price"],
+        ...     name="quantity_price_range",
+        ... )
+    """
+
+def check_rows(
+    func: Any,
+    columns: list[str] | None = None,
+    name: str | None = None,
+    max_reported_rows: int = 1000,
+) -> DataFrameCheck:
+    """Build a row-wise custom table check from a Python callable.
+
+    ``func`` receives one ``dict`` per row and must return a boolean, or
+    ``None`` to skip the row. By default the dict contains every column; pass
+    ``columns`` to restrict it. ``False`` fails the row and ``True`` passes.
+
+    The callable is compiled to ``pl.struct(...).map_elements(...)``, so Polars
+    still batches rows internally. Each callback holds the GIL, though, so
+    only one core does useful work. This is the slowest tier: expect roughly
+    ``0.1–0.3 µs`` per row for a simple predicate (about 100–300× slower than
+    :func:`check_expr`). Prefer :func:`check_expr`, then :func:`check_mask`,
+    and reach for ``check_rows`` when the rule is genuinely row-shaped or while
+    prototyping.
+
+    Args:
+        func: Callable taking one ``dict`` and returning a boolean or ``None``.
+        columns: Column names passed to the callable and attributed to
+            failures. ``None`` passes every column.
+        name: Check name reported in failures. Defaults to ``"CustomRows"``.
+        max_reported_rows: Maximum number of failing row indices kept in the
+            report. The total failure count is always included in the
+            message.
+
+    Returns:
+        A table check that reports rows where the predicate is false.
+
+    Raises:
+        TypeError: If ``func`` is not callable.
+        ValueError: If ``columns`` is empty, ``name`` is empty, or
+            ``max_reported_rows`` is zero.
+
+    Examples:
+        >>> import polars as pl
+        >>> import framelaw as fl
+        >>> check = fl.checks.table.check_rows(
+        ...     lambda row: row["qty"] * row["price"] == row["total"],
+        ...     columns=["qty", "price", "total"],
+        ...     name="total_consistent",
+        ... )
     """
 
 def gt_column(left: str, right: str) -> DataFrameCheck:

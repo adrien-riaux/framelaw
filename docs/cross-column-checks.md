@@ -154,3 +154,10 @@ err.rows     # failing row indices
 
 Table checks persist through `to_json()` / `from_json()` like everything
 else (see [Serialization](serialization.md)).
+
+## Custom rules
+
+When the built-in checks do not cover your rule, use
+[Custom checks](custom-checks.md): `check_expr` for vectorized Polars
+predicates, `check_mask` for batch Python callables, and `check_rows` for
+row-wise Python predicates.

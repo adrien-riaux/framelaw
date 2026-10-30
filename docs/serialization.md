@@ -28,6 +28,11 @@ assert restored.validate(df) is None
 - Every table check (`lt_column`, `unique_together`, …).
 - The `lazy` flag.
 
+Custom checks created with `check_expr`, `check_mask`, or `check_rows` are the
+exception: Python callables cannot be persisted, so `to_json()` raises
+`ValueError` for schemas that contain them. Rebuild those checks in code after
+loading.
+
 Malformed payloads raise `ValueError` (invalid JSON), as do unknown schema
 versions and unsupported dtype tags.
 

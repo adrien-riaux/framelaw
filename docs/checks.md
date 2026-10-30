@@ -122,3 +122,10 @@ fl.Column(
 
 Validation itself is parallelized across columns with Rayon, so wide frames
 scale with available cores.
+
+## Beyond the built-ins
+
+For domain-specific rules, see [Custom checks](custom-checks.md):
+`check_expr` evaluates a vectorized Polars predicate, `check_mask` calls a
+Python function once per validation chunk, and `check_rows` applies a Python
+predicate per row.

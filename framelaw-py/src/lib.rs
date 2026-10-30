@@ -1,7 +1,9 @@
-use polars::prelude::{DataFrame, NamedFrom, Series};
+use std::sync::Arc;
+
+use polars::prelude::{BooleanChunked, DataFrame, NamedFrom, Series};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDelta, PyDict, PyList, PyType};
-use pyo3_polars::{PyDataFrame, PyDataType};
+use pyo3::types::{PyAny, PyDelta, PyDict, PyIterator, PyList, PyTuple, PyType};
+use pyo3_polars::{PyDataFrame, PyDataType, PySeries};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +17,7 @@ use framelaw_core::dataframe_checks::{
     ColumnComparison, CompareOp, DataFrameCheck, DataFrameCheckSpec, Determines, Implies, Ordered,
     SumColumns, UniqueTogether, Within,
 };
+use framelaw_core::errors::ValidationError;
 use framelaw_core::inference::infer_schema as infer_core_schema;
 use framelaw_core::schema::Schema;
 
@@ -353,6 +356,56 @@ enum TableCheckType {
         right: String,
         max_gap_ns: i64,
     },
+    /// Vectorized custom predicate: a `pl.Expr` (or a zero-argument callable
+    /// returning one) that must produce a single Boolean column.
+    CustomExpr {
+        name: String,
+        expr: Arc<Py<PyAny>>,
+        max_reported_rows: usize,
+    },
+    /// Batch custom predicate: a callable receiving one `polars.DataFrame`
+    /// per validation chunk and returning a Boolean mask.
+    CustomMask {
+        name: String,
+        func: Arc<Py<PyAny>>,
+        columns: Vec<String>,
+        max_reported_rows: usize,
+    },
+    /// Row custom predicate: a callable receiving one `dict` per row.
+    CustomRows {
+        name: String,
+        func: Arc<Py<PyAny>>,
+        columns: Option<Vec<String>>,
+        max_reported_rows: usize,
+    },
+}
+
+/// A custom check resolved out of the Python-facing enum, ready to run.
+#[derive(Clone)]
+struct CustomCheck {
+    name: String,
+    max_reported_rows: usize,
+    kind: CustomCheckKind,
+}
+
+#[derive(Clone)]
+enum CustomCheckKind {
+    Expr(Arc<Py<PyAny>>),
+    Mask {
+        func: Arc<Py<PyAny>>,
+        columns: Vec<String>,
+    },
+    Rows {
+        func: Arc<Py<PyAny>>,
+        columns: Option<Vec<String>>,
+    },
+}
+
+/// Result of splitting a `PyDataFrameCheck` into what the Rust core can run
+/// and what only the Python binding can evaluate.
+enum CoreTableCheck {
+    Native(Box<dyn DataFrameCheck>),
+    Custom(CustomCheck),
 }
 
 #[pyclass(module = "framelaw", name = "DataFrameCheck", from_py_object)]
@@ -397,32 +450,78 @@ impl PyDataFrameCheck {
         Self { inner }
     }
 
-    fn into_check(self) -> Box<dyn DataFrameCheck> {
+    fn is_custom(&self) -> bool {
+        matches!(
+            self.inner,
+            TableCheckType::CustomExpr { .. }
+                | TableCheckType::CustomMask { .. }
+                | TableCheckType::CustomRows { .. }
+        )
+    }
+
+    fn resolve(self) -> CoreTableCheck {
         match self.inner {
             TableCheckType::Comparison { left, op, right } => {
-                Box::new(ColumnComparison { left, op, right })
+                CoreTableCheck::Native(Box::new(ColumnComparison { left, op, right }))
             }
-            TableCheckType::UniqueTogether { columns } => Box::new(UniqueTogether { columns }),
-            TableCheckType::Ordered { columns, strict } => Box::new(Ordered { columns, strict }),
+            TableCheckType::UniqueTogether { columns } => {
+                CoreTableCheck::Native(Box::new(UniqueTogether { columns }))
+            }
+            TableCheckType::Ordered { columns, strict } => {
+                CoreTableCheck::Native(Box::new(Ordered { columns, strict }))
+            }
             TableCheckType::SumColumns {
                 addends,
                 target,
                 tolerance,
-            } => Box::new(SumColumns {
+            } => CoreTableCheck::Native(Box::new(SumColumns {
                 addends,
                 target,
                 tolerance,
-            }),
-            TableCheckType::Implies { left, by } => Box::new(Implies { left, by }),
-            TableCheckType::Determines { a, b } => Box::new(Determines { a, b }),
+            })),
+            TableCheckType::Implies { left, by } => {
+                CoreTableCheck::Native(Box::new(Implies { left, by }))
+            }
+            TableCheckType::Determines { a, b } => {
+                CoreTableCheck::Native(Box::new(Determines { a, b }))
+            }
             TableCheckType::Within {
                 left,
                 right,
                 max_gap_ns,
-            } => Box::new(Within {
+            } => CoreTableCheck::Native(Box::new(Within {
                 left,
                 right,
                 max_gap_ns,
+            })),
+            TableCheckType::CustomExpr {
+                name,
+                expr,
+                max_reported_rows,
+            } => CoreTableCheck::Custom(CustomCheck {
+                name,
+                max_reported_rows,
+                kind: CustomCheckKind::Expr(expr),
+            }),
+            TableCheckType::CustomMask {
+                name,
+                func,
+                columns,
+                max_reported_rows,
+            } => CoreTableCheck::Custom(CustomCheck {
+                name,
+                max_reported_rows,
+                kind: CustomCheckKind::Mask { func, columns },
+            }),
+            TableCheckType::CustomRows {
+                name,
+                func,
+                columns,
+                max_reported_rows,
+            } => CoreTableCheck::Custom(CustomCheck {
+                name,
+                max_reported_rows,
+                kind: CustomCheckKind::Rows { func, columns },
             }),
         }
     }
@@ -590,6 +689,121 @@ fn within(left: String, right: String, max_gap: &Bound<'_, PyDelta>) -> PyResult
             left,
             right,
             max_gap_ns,
+        },
+    })
+}
+
+fn custom_check_name(name: Option<String>, default: &str) -> PyResult<String> {
+    let name = name.unwrap_or_else(|| default.to_string());
+    if name.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "custom check name must not be empty",
+        ));
+    }
+    Ok(name)
+}
+
+fn validate_max_reported_rows(max_reported_rows: usize) -> PyResult<()> {
+    if max_reported_rows == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "max_reported_rows must be at least 1",
+        ));
+    }
+    Ok(())
+}
+
+/// Builds a vectorized custom check from a Polars expression.
+///
+/// The expression (or zero-argument callable returning one) is evaluated with
+/// `DataFrame.select` and must yield exactly one Boolean column of the same
+/// height as the validated frame. Rows where the predicate is `False` fail;
+/// rows where it is null are skipped.
+#[pyfunction]
+#[pyo3(signature = (expr, name = None, max_reported_rows = 1000))]
+fn check_expr(
+    py: Python<'_>,
+    expr: Py<PyAny>,
+    name: Option<String>,
+    max_reported_rows: usize,
+) -> PyResult<PyDataFrameCheck> {
+    let bound = expr.bind(py);
+    if !bound.is_callable() && !bound.hasattr("meta")? {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "check_expr expects a polars.Expr or a zero-argument callable returning one",
+        ));
+    }
+    validate_max_reported_rows(max_reported_rows)?;
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::CustomExpr {
+            name: custom_check_name(name, "CustomExpr")?,
+            expr: Arc::new(expr),
+            max_reported_rows,
+        },
+    })
+}
+
+/// Builds a batch custom check from a Python callable.
+///
+/// The callable receives one `polars.DataFrame` per validation chunk and must
+/// return a Boolean `polars.Series` (or a sequence of booleans) of the same
+/// height. Rows where the mask is `False` fail; nulls are skipped.
+#[pyfunction]
+#[pyo3(signature = (func, columns = None, name = None, max_reported_rows = 1000))]
+fn check_mask(
+    py: Python<'_>,
+    func: Py<PyAny>,
+    columns: Option<Vec<String>>,
+    name: Option<String>,
+    max_reported_rows: usize,
+) -> PyResult<PyDataFrameCheck> {
+    if !func.bind(py).is_callable() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "check_mask expects a callable taking one polars.DataFrame",
+        ));
+    }
+    validate_max_reported_rows(max_reported_rows)?;
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::CustomMask {
+            name: custom_check_name(name, "CustomMask")?,
+            func: Arc::new(func),
+            columns: columns.unwrap_or_default(),
+            max_reported_rows,
+        },
+    })
+}
+
+/// Builds a row custom check from a Python callable.
+///
+/// The callable receives one `dict` per row (all columns by default, or the
+/// selected `columns`) and must return a boolean, or `None` to skip the row.
+/// It is compiled to `pl.struct(...).map_elements(...)`, so Polars batches
+/// rows internally while the predicate stays a plain Python function.
+#[pyfunction]
+#[pyo3(signature = (func, columns = None, name = None, max_reported_rows = 1000))]
+fn check_rows(
+    py: Python<'_>,
+    func: Py<PyAny>,
+    columns: Option<Vec<String>>,
+    name: Option<String>,
+    max_reported_rows: usize,
+) -> PyResult<PyDataFrameCheck> {
+    if !func.bind(py).is_callable() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "check_rows expects a callable taking one dict per row",
+        ));
+    }
+    if columns.as_ref().is_some_and(Vec::is_empty) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "check_rows columns must not be empty; omit columns to pass the whole row",
+        ));
+    }
+    validate_max_reported_rows(max_reported_rows)?;
+    Ok(PyDataFrameCheck {
+        inner: TableCheckType::CustomRows {
+            name: custom_check_name(name, "CustomRows")?,
+            func: Arc::new(func),
+            columns,
+            max_reported_rows,
         },
     })
 }
@@ -1479,6 +1693,13 @@ impl PySchema {
                 right: right.clone(),
                 max_gap_ns: *max_gap_ns,
             },
+            // `to_json` rejects schemas containing custom checks before this
+            // point; custom callables are inherently not serializable.
+            TableCheckType::CustomExpr { .. }
+            | TableCheckType::CustomMask { .. }
+            | TableCheckType::CustomRows { .. } => {
+                unreachable!("custom checks are rejected before serialization")
+            }
         }
     }
 
@@ -1621,7 +1842,7 @@ impl PySchema {
         })
     }
 
-    fn core_schema(&self, py: Python<'_>) -> PyResult<Schema> {
+    fn core_schema(&self, py: Python<'_>) -> PyResult<(Schema, Vec<CustomCheck>)> {
         let mut specs = Vec::new();
         for (name, col) in &self.columns {
             let checks: Vec<Box<dyn Check>> = col
@@ -1641,14 +1862,19 @@ impl PySchema {
             });
         }
 
-        let table_checks = self
-            .table_checks
-            .iter()
-            .cloned()
-            .map(|check| check.into_check())
-            .collect::<Vec<Box<dyn DataFrameCheck>>>();
+        let mut table_checks: Vec<Box<dyn DataFrameCheck>> = Vec::new();
+        let mut custom_checks: Vec<CustomCheck> = Vec::new();
+        for check in &self.table_checks {
+            match check.clone().resolve() {
+                CoreTableCheck::Native(check) => table_checks.push(check),
+                CoreTableCheck::Custom(check) => custom_checks.push(check),
+            }
+        }
 
-        Ok(Schema::with_table_checks(specs, table_checks))
+        Ok((
+            Schema::with_table_checks(specs, table_checks),
+            custom_checks,
+        ))
     }
 }
 
@@ -1701,6 +1927,12 @@ impl PySchema {
     }
 
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
+        if self.table_checks.iter().any(PyDataFrameCheck::is_custom) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Cannot serialize a schema that contains custom checks; remove them or rebuild \
+                 the schema without check_expr/check_mask/check_rows before calling to_json",
+            ));
+        }
         let columns = self
             .columns
             .iter()
@@ -1779,15 +2011,18 @@ impl PySchema {
         raise_on_error: Option<bool>,
         chunk_rows: Option<u64>,
     ) -> PyResult<Option<PyValidationReport>> {
-        let rust_schema = self.core_schema(py)?;
+        let (rust_schema, custom_checks) = self.core_schema(py)?;
 
         if let Some(chunk_rows) = chunk_rows {
-            return validate_chunked(py, df, &rust_schema, chunk_rows);
+            return validate_chunked(py, df, &rust_schema, &custom_checks, chunk_rows);
         }
 
         let raise = raise_on_error.unwrap_or(!self.lazy);
         let polars_df = materialize_frame(df)?;
-        let report = rust_schema.validate(&polars_df);
+        let mut report = py.detach(|| rust_schema.validate(&polars_df));
+        report
+            .errors
+            .extend(run_custom_checks(py, &polars_df, &custom_checks)?);
 
         if report.is_valid() {
             Ok(None)
@@ -1803,14 +2038,22 @@ impl PySchema {
         }
     }
 
+    #[pyo3(signature = (df, chunk_rows=None))]
     fn validate_lazy(
         &self,
         py: Python<'_>,
         df: &Bound<'_, PyAny>,
+        chunk_rows: Option<u64>,
     ) -> PyResult<Option<PyValidationReport>> {
-        let rust_schema = self.core_schema(py)?;
+        let (rust_schema, custom_checks) = self.core_schema(py)?;
+        if let Some(chunk_rows) = chunk_rows {
+            return validate_chunked(py, df, &rust_schema, &custom_checks, chunk_rows);
+        }
         let polars_df = materialize_frame(df)?;
-        let report = rust_schema.validate(&polars_df);
+        let mut report = py.detach(|| rust_schema.validate(&polars_df));
+        report
+            .errors
+            .extend(run_custom_checks(py, &polars_df, &custom_checks)?);
         if report.is_valid() {
             Ok(None)
         } else {
@@ -1820,7 +2063,7 @@ impl PySchema {
 
     #[pyo3(signature = (n=10, seed=None))]
     fn sample(&self, py: Python<'_>, n: usize, seed: Option<u64>) -> PyResult<PyDataFrame> {
-        let rust_schema = self.core_schema(py)?;
+        let (rust_schema, _) = self.core_schema(py)?;
         let seed = seed.unwrap_or_else(rand::random::<u64>);
         let frame = framelaw_core::generate::sample(&rust_schema, n, seed)
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
@@ -1847,15 +2090,284 @@ impl PyColumnRef {
     }
 }
 
+/// Extracts failing row indices from a Boolean mask. `True` passes, `False`
+/// fails, and nulls are skipped. Only the first `max_rows` indices are kept,
+/// alongside the total failure count, so a fully broken chunk cannot balloon
+/// the report.
+fn failing_rows(mask: &BooleanChunked, max_rows: usize) -> (Vec<usize>, usize) {
+    let mut rows = Vec::new();
+    let mut total = 0usize;
+    for (index, value) in mask.iter().enumerate() {
+        if value == Some(false) {
+            total += 1;
+            if rows.len() < max_rows {
+                rows.push(index);
+            }
+        }
+    }
+    (rows, total)
+}
+
+/// Evaluates a resolved `pl.Expr` against one frame and returns its Boolean
+/// mask. The expression must produce exactly one Boolean column and preserve
+/// the frame height.
+fn evaluate_expr_mask(
+    df: &Bound<'_, PyAny>,
+    expr: &Bound<'_, PyAny>,
+    height: usize,
+) -> PyResult<BooleanChunked> {
+    let selected = df.call_method1("select", (expr,))?;
+    let frame = selected.extract::<PyDataFrame>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "custom expression check must be a Polars expression producing one Boolean column",
+        )
+    })?;
+    let frame = frame.0;
+    if frame.width() != 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "custom expression check must select exactly one column, got {}",
+            frame.width()
+        )));
+    }
+    if frame.height() != height {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "custom expression check must preserve the row count ({}), got {}",
+            height,
+            frame.height()
+        )));
+    }
+    let series = frame.columns()[0].as_materialized_series();
+    series.bool().cloned().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "custom expression check must return Boolean, got {}",
+            series.dtype()
+        ))
+    })
+}
+
+/// Calls one batch custom check and coerces its result to a Boolean mask.
+/// A `polars.Series` is extracted directly; other sequences are wrapped with
+/// `polars.Series(...)`.
+fn evaluate_mask(
+    df: &Bound<'_, PyAny>,
+    func: &Bound<'_, PyAny>,
+    height: usize,
+) -> PyResult<BooleanChunked> {
+    let result = func.call1((df,))?;
+    if result.is_none() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "custom mask check must return a Boolean sequence, not None",
+        ));
+    }
+    let series: Series = if let Ok(series) = result.extract::<PySeries>() {
+        series.0
+    } else {
+        let polars = result.py().import("polars")?;
+        let series_class = polars.getattr("Series")?;
+        let wrapped = series_class.call1((&result,)).map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "custom mask check must return a polars.Series of booleans or a sequence of booleans",
+            )
+        })?;
+        wrapped.extract::<PySeries>()?.0
+    };
+    if series.len() != height {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "custom mask check must return {} value(s) for the current chunk, got {}",
+            height,
+            series.len()
+        )));
+    }
+    series.bool().cloned().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "custom mask check must return Boolean values, got {}",
+            series.dtype()
+        ))
+    })
+}
+
+/// Best-effort column attribution for custom expression checks.
+fn expr_root_names(expr: &Bound<'_, PyAny>) -> Vec<String> {
+    let Ok(meta) = expr.getattr("meta") else {
+        return Vec::new();
+    };
+    let Ok(names) = meta.call_method0("root_names") else {
+        return Vec::new();
+    };
+    names.extract::<Vec<String>>().unwrap_or_default()
+}
+
+/// Builds the `pl.struct(...).map_elements(...)` expression for a row check.
+///
+/// Wrapping the selected columns in a struct keeps the callback input a plain
+/// `dict`, which is the documented `fn(row: dict) -> bool` contract.
+fn rows_mask_expr<'py>(
+    py: Python<'py>,
+    func: &Bound<'py, PyAny>,
+    columns: Option<&[String]>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let polars = py.import("polars")?;
+    let struct_expr = match columns {
+        Some(columns) if !columns.is_empty() => {
+            let mut args = Vec::with_capacity(columns.len());
+            for column in columns {
+                args.push(polars.getattr("col")?.call1((column,))?);
+            }
+            polars.getattr("struct")?.call1(PyTuple::new(py, args)?)?
+        }
+        _ => {
+            let all = polars.getattr("all")?.call0()?;
+            polars.getattr("struct")?.call1((all,))?
+        }
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("return_dtype", polars.getattr("Boolean")?)?;
+    struct_expr.call_method("map_elements", (func,), Some(&kwargs))
+}
+
+/// Runs every custom check sequentially against the materialized frame.
+///
+/// Deliberately not parallel: custom checks re-enter Python, and running them
+/// concurrently with the Rayon-powered native pass risks GIL convoys. Each
+/// Polars expression already uses the global thread pool internally.
+fn run_custom_checks(
+    py: Python<'_>,
+    df: &DataFrame,
+    checks: &[CustomCheck],
+) -> PyResult<Vec<ValidationError>> {
+    if checks.is_empty() || df.height() == 0 {
+        return Ok(Vec::new());
+    }
+
+    let height = df.height();
+    let py_df = PyDataFrame(df.clone()).into_pyobject(py)?;
+    let mut errors = Vec::with_capacity(checks.len());
+
+    for check in checks {
+        let (mask, columns) = match &check.kind {
+            CustomCheckKind::Expr(expr) => {
+                let bound = expr.bind(py);
+                let resolved = if bound.is_callable() {
+                    bound.call0()?
+                } else {
+                    bound.clone()
+                };
+                let columns = expr_root_names(&resolved);
+                (evaluate_expr_mask(&py_df, &resolved, height)?, columns)
+            }
+            CustomCheckKind::Mask { func, columns } => (
+                evaluate_mask(&py_df, func.bind(py), height)?,
+                columns.clone(),
+            ),
+            CustomCheckKind::Rows { func, columns } => {
+                let expr = rows_mask_expr(py, func.bind(py), columns.as_deref())?;
+                let attributed = match columns {
+                    Some(columns) => columns.clone(),
+                    None => df
+                        .get_column_names()
+                        .iter()
+                        .map(|name| name.to_string())
+                        .collect(),
+                };
+                (evaluate_expr_mask(&py_df, &expr, height)?, attributed)
+            }
+        };
+
+        let (rows, total) = failing_rows(&mask, check.max_reported_rows);
+        if total == 0 {
+            continue;
+        }
+
+        let columns = if columns.is_empty() {
+            vec![check.name.clone()]
+        } else {
+            columns
+        };
+        let message = if total > rows.len() {
+            format!(
+                "Custom check '{}' failed for {} row(s); first {} at {:?}",
+                check.name,
+                total,
+                rows.len(),
+                rows
+            )
+        } else {
+            format!(
+                "Custom check '{}' failed for {} row(s) at {:?}",
+                check.name, total, rows
+            )
+        };
+        errors.push(ValidationError::multi(
+            columns,
+            check.name.clone(),
+            rows,
+            message,
+        ));
+    }
+
+    Ok(errors)
+}
+
+/// Validates one batch, shifting its error row indices by `offset`.
+fn validate_chunk_into(
+    py: Python<'_>,
+    chunk: &DataFrame,
+    rust_schema: &Schema,
+    custom_checks: &[CustomCheck],
+    offset: u64,
+    errors: &mut Vec<framelaw_core::errors::ValidationError>,
+) -> PyResult<()> {
+    let chunk_report = py.detach(|| rust_schema.validate(chunk));
+    let mut chunk_errors = chunk_report.errors;
+    chunk_errors.extend(run_custom_checks(py, chunk, custom_checks)?);
+    for mut error in chunk_errors {
+        for row in &mut error.rows {
+            *row += offset as usize;
+        }
+        errors.push(error);
+    }
+    Ok(())
+}
+
+/// Returns a streaming batch iterator for a `LazyFrame`, or `None` when the
+/// input is eager (or the installed Polars does not support batched collects).
+///
+/// `collect_batches` executes the plan once and yields chunks, so chunked
+/// validation no longer re-runs the whole lazy plan for every slice.
+fn streaming_batches<'py>(
+    py: Python<'py>,
+    df: &Bound<'py, PyAny>,
+    chunk_rows: u64,
+) -> PyResult<Option<Bound<'py, PyIterator>>> {
+    if !df.hasattr("collect_batches")? {
+        return Ok(None);
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("chunk_size", chunk_rows)?;
+    kwargs.set_item("engine", "streaming")?;
+    match df.call_method("collect_batches", (), Some(&kwargs)) {
+        Ok(batches) => Ok(Some(batches.try_iter()?)),
+        // Older Polars exposes `collect_batches` without the `engine` keyword;
+        // fall back to the slice-and-collect loop in that case.
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Validates the frame in batches of `chunk_rows` rows. Each batch is
 /// re-validated with the GIL released, and error row indices are shifted
 /// back to absolute frame positions. Chunked validation always reports
 /// instead of raising; note that dataset-wide checks (unique, joint table
 /// checks) only see one chunk at a time.
-fn validate_chunked(
-    py: Python<'_>,
-    df: &Bound<'_, PyAny>,
+///
+/// Lazy frames are streamed through `LazyFrame.collect_batches`, so the plan
+/// runs once and peak memory stays proportional to `chunk_rows` rather than
+/// the full dataset.
+fn validate_chunked<'py>(
+    py: Python<'py>,
+    df: &Bound<'py, PyAny>,
     rust_schema: &Schema,
+    custom_checks: &[CustomCheck],
     chunk_rows: u64,
 ) -> PyResult<Option<PyValidationReport>> {
     if chunk_rows == 0 {
@@ -1865,30 +2377,53 @@ fn validate_chunked(
     }
     let mut errors: Vec<framelaw_core::errors::ValidationError> = Vec::new();
     let mut offset: u64 = 0;
-    loop {
-        let sliced = df.call_method1("slice", (offset as isize, chunk_rows as isize))?;
-        let batch = if sliced.hasattr("collect")? {
-            sliced.call_method0("collect")?
-        } else {
-            sliced
-        };
-        let chunk = batch.extract::<PyDataFrame>()?;
-        let height = chunk.0.height() as u64;
-        if height == 0 {
-            break;
-        }
-        let chunk_report = py.detach(|| rust_schema.validate(&chunk.0));
-        for mut error in chunk_report.errors {
-            for row in &mut error.rows {
-                *row += offset as usize;
+
+    if let Some(batches) = streaming_batches(py, df, chunk_rows)? {
+        for batch in batches {
+            let batch = batch?;
+            let chunk = batch.extract::<PyDataFrame>()?;
+            let height = chunk.0.height() as u64;
+            if height == 0 {
+                continue;
             }
-            errors.push(error);
+            validate_chunk_into(
+                py,
+                &chunk.0,
+                rust_schema,
+                custom_checks,
+                offset,
+                &mut errors,
+            )?;
+            offset += height;
         }
-        offset += height;
-        if height < chunk_rows {
-            break;
+    } else {
+        loop {
+            let sliced = df.call_method1("slice", (offset as isize, chunk_rows as isize))?;
+            let batch = if sliced.hasattr("collect")? {
+                sliced.call_method0("collect")?
+            } else {
+                sliced
+            };
+            let chunk = batch.extract::<PyDataFrame>()?;
+            let height = chunk.0.height() as u64;
+            if height == 0 {
+                break;
+            }
+            validate_chunk_into(
+                py,
+                &chunk.0,
+                rust_schema,
+                custom_checks,
+                offset,
+                &mut errors,
+            )?;
+            offset += height;
+            if height < chunk_rows {
+                break;
+            }
         }
     }
+
     let report = framelaw_core::errors::ValidationReport { errors };
     if report.is_valid() {
         Ok(None)
@@ -1970,6 +2505,9 @@ fn _framelaw(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(implies, m)?)?;
     m.add_function(wrap_pyfunction!(determines, m)?)?;
     m.add_function(wrap_pyfunction!(within, m)?)?;
+    m.add_function(wrap_pyfunction!(check_expr, m)?)?;
+    m.add_function(wrap_pyfunction!(check_mask, m)?)?;
+    m.add_function(wrap_pyfunction!(check_rows, m)?)?;
     m.add_function(wrap_pyfunction!(infer_schema, m)?)?;
     m.add_function(wrap_pyfunction!(sample_function, m)?)?;
 
