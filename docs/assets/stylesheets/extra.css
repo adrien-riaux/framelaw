@@ -1,21 +1,152 @@
-/* Small refinements on top of Material for MkDocs. */
+/* Refinements on top of Material for MkDocs. */
 
+/* Give the content a little more room on desktop without stretching prose. */
+.md-grid {
+  max-width: 78rem;
+}
+
+.md-typeset {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Landing-page hero. */
 .md-typeset .hero {
-  padding: 1.2rem 0 0.4rem;
+  margin: 0.5rem 0 2.5rem;
+  padding: 2.75rem 2.5rem 2.25rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 1.1rem;
+  background:
+    radial-gradient(circle at 12% 15%, rgb(63 81 181 / 14%), transparent 45%),
+    radial-gradient(circle at 88% 0%, rgb(0 172 193 / 10%), transparent 40%),
+    linear-gradient(140deg, var(--md-default-bg-color) 20%, var(--md-code-bg-color) 100%);
+}
+
+.md-typeset .hero h1 {
+  margin: 0 0 0.65rem;
+  color: var(--md-default-fg-color);
+  font-size: clamp(2.1rem, 4vw, 2.75rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
 }
 
 .md-typeset .hero p {
+  max-width: 46rem;
+  margin: 0 0 1.5rem;
+  color: var(--md-default-fg-color--light);
   font-size: 1.05rem;
+  line-height: 1.65;
 }
 
 .md-typeset .hero .md-button {
-  margin-top: 0.4rem;
+  margin: 0.25rem 0.6rem 0.25rem 0;
+  padding: 0.55rem 1.5rem;
+  border-radius: 999px;
+  font-weight: 600;
+  transition:
+    transform 150ms ease,
+    box-shadow 150ms ease,
+    background-color 150ms ease,
+    border-color 150ms ease;
 }
 
+.md-typeset .hero .md-button--primary {
+  box-shadow: 0 0.4rem 1.1rem rgb(63 81 181 / 28%);
+}
+
+.md-typeset .hero .md-button--primary:hover {
+  background-color: var(--md-primary-fg-color--dark);
+  box-shadow: 0 0.55rem 1.4rem rgb(63 81 181 / 34%);
+}
+
+.md-typeset .hero .md-button:hover {
+  transform: translateY(-2px);
+}
+
+.md-typeset .hero .md-button:focus-visible {
+  outline: 2px solid var(--md-accent-fg-color);
+  outline-offset: 3px;
+}
+
+/* Badges sit under the hero, where they stay readable but out of the way. */
+.md-typeset .hero-badges {
+  margin: -0.5rem 0 2.5rem;
+}
+
+.md-typeset .hero-badges > p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.7rem;
+  align-items: center;
+  margin: 0;
+}
+
+.md-typeset .hero-badges img {
+  display: block;
+  width: auto;
+  height: 1.3rem;
+}
+
+/* Softer surfaces. */
 .md-typeset .grid.cards > ul > li {
-  border-radius: 0.4rem;
+  border-radius: 0.8rem;
+  transition:
+    transform 150ms ease,
+    box-shadow 150ms ease,
+    border-color 150ms ease;
+}
+
+.md-typeset .grid.cards > ul > li:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 8%);
 }
 
 .md-typeset code {
-  border-radius: 0.2rem;
+  border-radius: 0.3rem;
+}
+
+.md-typeset pre > code {
+  border-radius: 0.6rem;
+}
+
+/* The tinted background needs a little more lift in dark mode. */
+[data-md-color-scheme="slate"] .md-typeset .hero {
+  background:
+    radial-gradient(circle at 12% 15%, rgb(121 134 203 / 16%), transparent 45%),
+    radial-gradient(circle at 88% 0%, rgb(77 208 225 / 10%), transparent 40%),
+    linear-gradient(140deg, var(--md-default-bg-color) 20%, var(--md-code-bg-color) 100%);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li:hover {
+  box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 35%);
+}
+
+@media screen and (max-width: 44.9375em) {
+  .md-typeset .hero {
+    padding: 1.75rem 1.25rem 1.5rem;
+    border-radius: 0.9rem;
+  }
+
+  .md-typeset .hero h1 {
+    font-size: 2rem;
+  }
+
+  .md-typeset .hero .md-button {
+    width: 100%;
+    margin-right: 0;
+    text-align: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .md-typeset .hero .md-button,
+  .md-typeset .grid.cards > ul > li {
+    transition: none;
+  }
+
+  .md-typeset .hero .md-button:hover,
+  .md-typeset .grid.cards > ul > li:hover {
+    transform: none;
+  }
 }
