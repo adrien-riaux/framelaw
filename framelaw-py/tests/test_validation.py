@@ -32,6 +32,84 @@ def test_validation_returns_report_with_rows() -> None:
         schema.validate(dataframe)
 
 
+def test_summary_format_is_public_and_deduplicated() -> None:
+    """Show the public check name once per line without column duplication."""
+    schema = fl.Schema(
+        {
+            "age": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)]),
+            "missingutzer": fl.Column(pl.Int64),
+        }
+    )
+    dataframe = pl.DataFrame({"age": [1, -2]})
+
+    report = schema.validate(dataframe, raise_on_error=False)
+
+    assert report.summary() == (
+        "Validation failed with 2 errors\n"
+        "- Column 'age' (rows 1): value must be > 0 [gt]\n"
+        "- Column 'missingutzer' (schema): column is missing from the DataFrame [column_exists]"
+    )
+
+
+def test_row_lists_collapse_beyond_the_cap() -> None:
+    """Hide row indices past five and count the remainder."""
+    schema = fl.Schema(
+        {"age": fl.Column(pl.Int64, nullable=False, checks=[fl.checks.column.gt(0)])}
+    )
+    dataframe = pl.DataFrame({"age": [None, None, None, None, None, None, 1, 2]})
+
+    report = schema.validate(dataframe, raise_on_error=False)
+
+    assert report.summary() == (
+        "Validation failed with 1 error\n"
+        "- Column 'age' (rows 0, 1, 2, 3, 4 +1 more): found 6 null value(s) [not_null]"
+    )
+
+
+def test_schema_error_subclasses_value_error() -> None:
+    """Failures raise a dedicated exception still caught by ``ValueError``."""
+    schema = fl.Schema(
+        {
+            "age": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)]),
+            "missingutzer": fl.Column(pl.Int64),
+        }
+    )
+    dataframe = pl.DataFrame({"age": [-1]})
+
+    with pytest.raises(fl.SchemaError, match="Validation failed with 2 errors") as exc_info:
+        schema.validate(dataframe)
+    assert isinstance(exc_info.value, ValueError)
+    assert "[gt]" in str(exc_info.value)
+
+
+def test_one_of_failure_message_shows_values() -> None:
+    """Include offending values and the allowed set for ``one_of``."""
+    schema = fl.Schema(
+        {"status": fl.Column(pl.String, checks=[fl.checks.column.is_in(["A", "B"])])}
+    )
+    dataframe = pl.DataFrame({"status": ["A", "C", "D"]})
+
+    report = schema.validate(dataframe, raise_on_error=False)
+
+    assert report.summary() == (
+        "Validation failed with 1 error\n"
+        "- Column 'status' (rows 1, 2): values ['C', 'D'] are not one of ['A', 'B'] [one_of]"
+    )
+
+
+def test_matches_message_shows_first_offender() -> None:
+    """Include a truncated sample of the first offending value for regexes."""
+    schema = fl.Schema(
+        {"zip": fl.Column(pl.String, checks=[fl.checks.column.matches_regex(r"^\d$")])}
+    )
+    dataframe = pl.DataFrame({"zip": ["1", "ab", "cd", "ef", "gh", "ij"]})
+
+    report = schema.validate(dataframe, raise_on_error=False)
+
+    assert "does not match pattern '^" in report.summary()
+    assert "[matches]" in report.summary()
+
+
 def test_aliases_and_valid_data() -> None:
     """Expose the documented check aliases and accept valid data."""
     schema = fl.Schema(
@@ -80,11 +158,11 @@ def test_string_checks_report_expected_rows() -> None:
     report = schema.validate(bad, raise_on_error=False)
     assert not report.is_valid()
     rows_by_check = {e.check: e.rows for e in report.errors}
-    assert rows_by_check["StrLengthBetween"] == [0, 1]
-    assert rows_by_check["NotBlank"] == [1]
-    assert rows_by_check["StartsWith"] == [1, 2]
-    assert rows_by_check["EndsWith"] == [1, 3, 4]
-    assert rows_by_check["OneOfString"] == [0, 1, 2, 3, 4]
+    assert rows_by_check["str_length_between"] == [0, 1]
+    assert rows_by_check["not_blank"] == [1]
+    assert rows_by_check["starts_with"] == [1, 2]
+    assert rows_by_check["ends_with"] == [1, 3, 4]
+    assert rows_by_check["one_of"] == [0, 1, 2, 3, 4]
 
 
 def test_numeric_and_boolean_one_of_membership() -> None:
@@ -101,7 +179,7 @@ def test_numeric_and_boolean_one_of_membership() -> None:
 
     bad = pl.DataFrame({"level": [3], "score": [1.0], "flag": [False]})
     report = schema.validate(bad, raise_on_error=False)
-    assert all(e.check == "OneOfNumeric" for e in report.errors)
+    assert all(e.check == "one_of" for e in report.errors)
     assert len(report.errors) == 3
     assert next(e for e in report.errors if e.column == "level").rows == [0]
     assert next(e for e in report.errors if e.column == "score").rows == [0]
@@ -145,20 +223,21 @@ def test_new_string_checks_json_round_trip() -> None:
     report = loaded.validate(bad, raise_on_error=False)
     assert not report.is_valid()
     assert next(
-        e for e in report.errors if e.column == "code" and e.check == "StrLengthBetween"
+        e for e in report.errors if e.column == "code" and e.check == "str_length_between"
     ).rows == [0, 1]
-    assert next(e for e in report.errors if e.column == "code" and e.check == "NotBlank").rows == [
+    assert next(e for e in report.errors if e.column == "code" and e.check == "not_blank").rows == [
         1
     ]
     assert next(
-        e for e in report.errors if e.column == "file" and e.check == "StartsWith"
+        e for e in report.errors if e.column == "file" and e.check == "starts_with"
     ).rows == [0]
-    assert next(e for e in report.errors if e.column == "file" and e.check == "EndsWith").rows == [
+    assert next(e for e in report.errors if e.column == "file" and e.check == "ends_with").rows == [
         0
     ]
-    assert next(
-        e for e in report.errors if e.column == "level" and e.check == "OneOfNumeric"
-    ).rows == [0, 1]
+    assert next(e for e in report.errors if e.column == "level" and e.check == "one_of").rows == [
+        0,
+        1,
+    ]
 
 
 def test_new_string_checks_generation() -> None:
@@ -188,7 +267,7 @@ def test_dtype_mismatch_is_reported() -> None:
     report = schema.validate(dataframe, raise_on_error=False)
 
     assert not report.is_valid()
-    assert report.errors[0].check == "Dtype"
+    assert report.errors[0].check == "dtype"
     assert report.errors[0].rows == []
 
 
@@ -214,9 +293,9 @@ def test_infer_schema_and_refine_column() -> None:
         pl.Series("email", ["a@example.com", "invalid", "c@example.com"]),
     )
     report = schema.validate(invalid, raise_on_error=False)
-    assert any(error.column == "age" and error.check == "LessThanF64" for error in report.errors)
+    assert any(error.column == "age" and error.check == "lt" for error in report.errors)
     assert any(
-        error.column == "email" and error.check == "MatchesRegex" and error.rows == [1]
+        error.column == "email" and error.check == "matches" and error.rows == [1]
         for error in report.errors
     )
 
@@ -795,7 +874,7 @@ def test_explicit_not_null_fails_on_all_null_column() -> None:
     dataframe = pl.DataFrame({"value": [None, None]}, schema={"value": pl.Null})
     report = schema.validate(dataframe, raise_on_error=False)
     assert not report.is_valid()
-    assert report.errors[0].check == "NotNull"
+    assert report.errors[0].check == "not_null"
     assert report.errors[0].rows == [0, 1]
 
 
@@ -908,7 +987,7 @@ def test_struct_field_error_lists_full_field_path() -> None:
         }
     )
     report = schema.validate(dataframe, raise_on_error=False)
-    blank_errors = [error for error in report.errors if error.check == "NotBlank"]
+    blank_errors = [error for error in report.errors if error.check == "not_blank"]
     assert len(blank_errors) == 1
     assert blank_errors[0].column == "l1"
     assert blank_errors[0].rows == [1]

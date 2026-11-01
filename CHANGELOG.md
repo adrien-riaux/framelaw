@@ -3,6 +3,38 @@
 All notable changes to Framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] — 2026-11-01
+
+### Added
+
+- `fl.guard` decorator — attaches a schema to a function or method and
+  validates the named DataFrame argument(s) before the callable runs; an
+  optional `returns` schema validates the outgoing frame. Methods,
+  `staticmethod`/`classmethod`, async functions, and `chunk_rows`
+  pass-through are supported.
+- `fl.SchemaError` — dedicated exception (subclass of `ValueError`) raised by
+  `Schema.validate` / `ValidationReport.raise_if_invalid` when a frame is
+  invalid. Existing `except ValueError` code keeps working; `except
+  fl.SchemaError` catches validation failures specifically.
+
+### Changed
+
+- Validation summaries are fully reworked and now render as a count header
+  plus one line per error, each with location, capped row indices
+  (first five, then `+N more`), a self-contained message, and the public
+  check name in brackets — e.g.
+  `- Column 'age' (rows 1): value must be > 0 [gt]`. Rust check struct
+  names (`GreaterThanF64`, …) no longer leak into the `check` field; it now
+  carries the user-facing name (`gt`, `one_of`, `lt_column`, …). Schema-level
+  checks are named `dtype`, `column_exists`, and `not_null`. Row lists no
+  longer dump every index; the full list stays on each error's `rows`
+  attribute.
+- `one_of` failures include the sample offending values and the allowed set;
+  regex failures include a truncated first offending value. Type-mismatch
+  messages read `column is not a String` and friends.
+- Cross-column failure messages no longer duplicate the failing row-index
+  list ("at [0, 1]"); indices live in the summary's row prefix.
+
 ## [0.4.1] — 2026-10-31
 
 ### Documentation

@@ -22,8 +22,11 @@ schema — column types, nullability, value constraints, and cross-column rules
   and temporal gaps.
 - **Custom checks**: vectorized Polars expressions, batch Python callables, or
   row-wise Python predicates, with bounded failure reports.
-- **Structured failures** with the column(s), check name, failing row indices,
-  and a message; convert a report to a Polars frame to quarantine rows.
+- **Structured failures** with the column(s), public check name, failing row
+  indices, and a message; convert a report to a Polars frame to quarantine
+  rows. Failures raise `fl.SchemaError` (a `ValueError` subclass).
+- **Function decorator** — `@fl.guard(schema, df="df")` validates DataFrame
+  arguments (and optionally the return value) of any function or method.
 - **Schema inference** from trusted data, **Pydantic v2** derivation, and
   versioned **JSON** round-trips.
 - **Reproducible fixtures** with seeded sampling from any schema.
@@ -91,6 +94,7 @@ Useful entry points:
 - [Quickstart](https://adrien-riaux.github.io/framelaw/quickstart/)
 - [Checks](https://adrien-riaux.github.io/framelaw/checks/)
 - [Cross-column checks](https://adrien-riaux.github.io/framelaw/cross-column-checks/)
+- [Decorator](https://adrien-riaux.github.io/framelaw/decorator/)
 - [Error reports](https://adrien-riaux.github.io/framelaw/error-reports/)
 - [Pydantic integration](https://adrien-riaux.github.io/framelaw/pydantic/)
 - [API reference](https://adrien-riaux.github.io/framelaw/reference/)

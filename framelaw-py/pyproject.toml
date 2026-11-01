@@ -1,6 +1,6 @@
 [project]
 name = "framelaw"
-version = "0.4.1"
+version = "0.5.0"
 requires-python = ">=3.10"
 description = "Native Rust schema validation for Polars DataFrames"
 readme = "README.md"
@@ -68,6 +68,8 @@ ignore = ["D100", "D104"]
 
 [tool.ruff.lint.per-file-ignores]
 "python/framelaw/_framelaw.pyi" = ["ANN401"]
+# Inner wrappers forward arbitrary call signatures through *args/**kwargs.
+"python/framelaw/_decorator.py" = ["ANN401"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

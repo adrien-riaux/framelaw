@@ -44,12 +44,14 @@ from ._compat import (
     unique_values,
     within,
 )
+from ._decorator import guard
 from ._framelaw import (
     Check,
     Column,
     ColumnRef,
     DataFrameCheck,
     Schema,
+    SchemaError,
     ValidationError,
     ValidationReport,
     infer_schema,
@@ -68,9 +70,11 @@ __all__ = [
     "ColumnRef",
     "DataFrameCheck",
     "Schema",
+    "SchemaError",
     "ValidationError",
     "ValidationReport",
     "checks",
+    "guard",
     "infer_schema",
     "sample",
     # Deprecated top-level check aliases, kept for compatibility.

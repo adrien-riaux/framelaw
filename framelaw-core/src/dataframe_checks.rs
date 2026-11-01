@@ -71,9 +71,9 @@ pub trait DataFrameCheck: Send + Sync {
 fn missing_column_error(requested: &[String]) -> ValidationError {
     ValidationError::multi(
         requested.to_vec(),
-        "ColumnExists",
+        "column_exists",
         vec![],
-        format!("Missing column(s): {}", requested.join(", ")),
+        "column is missing from the DataFrame",
     )
 }
 
@@ -261,7 +261,14 @@ impl ColumnComparison {
 
 impl DataFrameCheck for ColumnComparison {
     fn name(&self) -> &str {
-        "ColumnComparison"
+        match self.op {
+            CompareOp::Lt => "lt_column",
+            CompareOp::Le => "lte_column",
+            CompareOp::Gt => "gt_column",
+            CompareOp::Ge => "gte_column",
+            CompareOp::Eq => "eq_columns",
+            CompareOp::Ne => "ne_columns",
+        }
     }
     fn spec(&self) -> DataFrameCheckSpec {
         DataFrameCheckSpec::ColumnComparison {
@@ -390,12 +397,11 @@ fn comparison_result(check: &ColumnComparison, failed: Vec<usize>) -> Vec<Valida
             check.name(),
             failed.clone(),
             format!(
-                "Condition '{} {} {}' failed for {} row(s) at {:?}",
+                "condition '{} {} {}' failed for {} row(s)",
                 check.left,
                 check.op.as_str(),
                 check.right,
                 failed.len(),
-                failed
             ),
         )]
     }
@@ -526,7 +532,7 @@ fn compare_mixed_pair(
 
 impl DataFrameCheck for Ordered {
     fn name(&self) -> &str {
-        "Ordered"
+        "ordered"
     }
 
     fn spec(&self) -> DataFrameCheckSpec {
@@ -623,11 +629,7 @@ impl DataFrameCheck for Ordered {
                 self.columns.clone(),
                 self.name(),
                 failed.clone(),
-                format!(
-                    "Ordering '{symbols}' failed for {} row(s) at {:?}",
-                    failed.len(),
-                    failed
-                ),
+                format!("ordering '{}' failed for {} row(s)", symbols, failed.len()),
             )]
         }
     }
@@ -646,7 +648,7 @@ pub struct SumColumns {
 
 impl DataFrameCheck for SumColumns {
     fn name(&self) -> &str {
-        "SumColumns"
+        "sum_columns"
     }
 
     fn spec(&self) -> DataFrameCheckSpec {
@@ -743,7 +745,7 @@ impl DataFrameCheck for SumColumns {
                 self.name(),
                 failed.clone(),
                 format!(
-                    "Sum '{}' must equal '{}' failed for {} row(s) at {:?}",
+                    "sum '{}' must equal '{}' failed for {} row(s)",
                     self.addends
                         .iter()
                         .map(|name| name.as_str())
@@ -751,7 +753,6 @@ impl DataFrameCheck for SumColumns {
                         .join(" + "),
                     self.target,
                     failed.len(),
-                    failed
                 ),
             )]
         }
@@ -883,7 +884,7 @@ pub struct Implies {
 
 impl DataFrameCheck for Implies {
     fn name(&self) -> &str {
-        "Implies"
+        "implies"
     }
 
     fn spec(&self) -> DataFrameCheckSpec {
@@ -921,13 +922,10 @@ impl DataFrameCheck for Implies {
                 self.name(),
                 failed.clone(),
                 format!(
-                    "Rows where '{}' is present require '{}'. Non-null '{}' with null '{}' in {} row(s) at {:?}",
-                    self.left,
-                    self.by,
+                    "where '{}' is present, '{}' must not be null ({} row(s))",
                     self.left,
                     self.by,
                     failed.len(),
-                    failed
                 ),
             )]
         }
@@ -945,7 +943,7 @@ pub struct Determines {
 
 impl DataFrameCheck for Determines {
     fn name(&self) -> &str {
-        "Determines"
+        "determines"
     }
 
     fn spec(&self) -> DataFrameCheckSpec {
@@ -1001,11 +999,8 @@ impl DataFrameCheck for Determines {
                 self.name(),
                 failed.clone(),
                 format!(
-                    "Each distinct '{}' value must map to exactly one '{}' value; conflicting mappings in {} row(s) at {:?}",
-                    self.a,
-                    self.b,
-                    failed.len(),
-                    failed
+                    "each distinct '{}' value must map to exactly one '{}' value ({} conflicting row(s))",
+                    self.a, self.b, failed.len(),
                 ),
             )]
         }
@@ -1038,7 +1033,7 @@ pub(crate) fn ns_per_tick(dtype: &DataType) -> i128 {
 
 impl DataFrameCheck for Within {
     fn name(&self) -> &str {
-        "Within"
+        "within"
     }
 
     fn spec(&self) -> DataFrameCheckSpec {
@@ -1131,12 +1126,11 @@ impl DataFrameCheck for Within {
                 self.name(),
                 failed.clone(),
                 format!(
-                    "'{}' must be at most {} within '{}': violated in {} row(s) at {:?}",
+                    "gap from '{}' to '{}' exceeds {}ns ({} row(s))",
+                    self.left,
                     self.right,
                     self.max_gap_ns,
-                    self.left,
                     failed.len(),
-                    failed
                 ),
             )]
         }
@@ -1150,7 +1144,7 @@ pub struct UniqueTogether {
 
 impl DataFrameCheck for UniqueTogether {
     fn name(&self) -> &str {
-        "UniqueTogether"
+        "unique_together"
     }
     fn spec(&self) -> DataFrameCheckSpec {
         DataFrameCheckSpec::UniqueTogether {
@@ -1195,10 +1189,9 @@ impl DataFrameCheck for UniqueTogether {
                 self.name(),
                 rows.clone(),
                 format!(
-                    "Duplicate combinations of ({}) in {} row(s) at {:?}",
+                    "duplicate ({}) combinations in {} row(s)",
                     self.columns.join(", "),
                     rows.len(),
-                    rows
                 ),
             )]
         } else {
@@ -1261,7 +1254,7 @@ mod tests {
             op: CompareOp::Gt,
             right: "nope".to_string(),
         };
-        assert_eq!(missing.validate(&df)[0].check, "ColumnExists");
+        assert_eq!(missing.validate(&df)[0].check, "column_exists");
     }
 
     #[test]
@@ -1538,7 +1531,7 @@ mod tests {
             right: "missing".to_string(),
             max_gap_ns: 1,
         };
-        assert_eq!(invalid.validate(&df)[0].check, "ColumnExists");
+        assert_eq!(invalid.validate(&df)[0].check, "column_exists");
     }
 
     #[test]

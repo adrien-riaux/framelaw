@@ -8,7 +8,7 @@ description: Native Rust schema validation for Polars DataFrames.
 
 Validate Polars `DataFrame`s and `LazyFrame`s against a declarative schema —
 types, nullability, value checks, and cross-column rules — in parallel Rust,
-behind a small, Pandera-like Python API.
+behind a Python API.
 
 [Get started](quickstart.md){ .md-button .md-button--primary }
 [API reference](reference/index.md){ .md-button }
@@ -122,9 +122,10 @@ if report is not None and not report.is_valid():
 Output:
 
 ```text
-Column 'age': rows [1], check 'GreaterThanF64': Values in 'age' must be > 0
-Column 'email': rows [2], check 'MatchesRegex': Values in 'email' do not match pattern '.+@.+\..+'
-Column 'country': rows [2], check 'OneOfString': Values in 'country' are not part of the allowed set
+Validation failed with 3 errors
+- Column 'age' (rows 1): value must be > 0 [gt]
+- Column 'email' (rows 2): does not match pattern '.+@.+\..+' (first offender: 'not-an-email') [matches]
+- Column 'country' (rows 2): values ['XX'] are not one of ['DE', 'FR', 'US'] [one_of]
 ```
 
 ## Explore the docs
@@ -135,6 +136,8 @@ Column 'country': rows [2], check 'OneOfString': Values in 'country' are not par
   [Cross-column checks](cross-column-checks.md).
 - **Feeding pipelines?** See [Lazy validation](lazy-validation.md),
   [Error reports](error-reports.md), and [Recipes](recipes.md).
+- **Wrapping functions?** Attach schemas to callables with the
+  [Decorator](decorator.md).
 - **Coming from Pydantic?** Derive a schema in one line with
   [Pydantic integration](pydantic.md).
 - **Looking for a specific symbol?** The [API reference](reference/index.md)

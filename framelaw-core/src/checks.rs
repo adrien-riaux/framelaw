@@ -36,7 +36,7 @@ pub struct NotNull;
 
 impl Check for NotNull {
     fn name(&self) -> &str {
-        "NotNull"
+        "not_null"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::NotNull
@@ -52,11 +52,7 @@ impl Check for NotNull {
                 column_name,
                 self.name(),
                 rows,
-                format!(
-                    "Found {} null values in '{}'",
-                    series.null_count(),
-                    column_name
-                ),
+                format!("found {} null value(s)", series.null_count()),
             ));
         }
         errors
@@ -68,7 +64,7 @@ pub struct UniqueValues;
 
 impl Check for UniqueValues {
     fn name(&self) -> &str {
-        "UniqueValues"
+        "unique"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::UniqueValues
@@ -84,7 +80,7 @@ impl Check for UniqueValues {
                         column_name,
                         self.name(),
                         rows,
-                        format!("Found duplicated values in '{}'", column_name),
+                        "contains duplicated values",
                     ));
                 }
             }
@@ -101,7 +97,7 @@ pub struct GreaterThanF64 {
 
 impl Check for GreaterThanF64 {
     fn name(&self) -> &str {
-        "GreaterThanF64"
+        "gt"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::GreaterThan(self.min_value)
@@ -116,7 +112,7 @@ impl Check for GreaterThanF64 {
                 column_name,
                 self.name(),
                 get_true_indices(&mask),
-                format!("Values in '{}' must be > {}", column_name, self.min_value),
+                format!("value must be > {}", self.min_value),
             )],
             Ok(_) => Vec::new(),
             Err(_) => vec![type_mismatch_error(
@@ -135,7 +131,7 @@ pub struct LessThanF64 {
 
 impl Check for LessThanF64 {
     fn name(&self) -> &str {
-        "LessThanF64"
+        "lt"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::LessThan(self.max_value)
@@ -150,7 +146,7 @@ impl Check for LessThanF64 {
                 column_name,
                 self.name(),
                 get_true_indices(&mask),
-                format!("Values in '{}' must be < {}", column_name, self.max_value),
+                format!("value must be < {}", self.max_value),
             )],
             Ok(_) => Vec::new(),
             Err(_) => vec![type_mismatch_error(
@@ -168,7 +164,7 @@ pub struct GreaterThanOrEqualF64 {
 
 impl Check for GreaterThanOrEqualF64 {
     fn name(&self) -> &str {
-        "GreaterThanOrEqualF64"
+        "gte"
     }
 
     fn spec(&self) -> CheckSpec {
@@ -186,7 +182,7 @@ impl Check for GreaterThanOrEqualF64 {
                     column_name,
                     self.name(),
                     get_true_indices(&mask),
-                    format!("Values in '{}' must be >= {}", column_name, self.min_value),
+                    format!("value must be >= {}", self.min_value),
                 )]
             }
             Ok(_) => Vec::new(),
@@ -205,7 +201,7 @@ pub struct LessThanOrEqualF64 {
 
 impl Check for LessThanOrEqualF64 {
     fn name(&self) -> &str {
-        "LessThanOrEqualF64"
+        "lte"
     }
 
     fn spec(&self) -> CheckSpec {
@@ -223,7 +219,7 @@ impl Check for LessThanOrEqualF64 {
                     column_name,
                     self.name(),
                     get_true_indices(&mask),
-                    format!("Values in '{}' must be <= {}", column_name, self.max_value),
+                    format!("value must be <= {}", self.max_value),
                 )]
             }
             Ok(_) => Vec::new(),
@@ -244,7 +240,7 @@ pub struct BetweenF64 {
 
 impl Check for BetweenF64 {
     fn name(&self) -> &str {
-        "BetweenF64"
+        "between"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::Between(self.min_value, self.max_value)
@@ -269,8 +265,8 @@ impl Check for BetweenF64 {
                     self.name(),
                     rows,
                     format!(
-                        "Values in '{}' must be between {} and {}",
-                        column_name, self.min_value, self.max_value
+                        "value must be between {} and {}",
+                        self.min_value, self.max_value
                     ),
                 )]
             }
@@ -291,7 +287,7 @@ pub struct MatchesRegex {
 
 impl Check for MatchesRegex {
     fn name(&self) -> &str {
-        "MatchesRegex"
+        "matches"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::Matches(self.pattern.as_str().to_string())
@@ -301,29 +297,35 @@ impl Check for MatchesRegex {
 
         if let Ok(ca) = series.str() {
             let mut failed_rows = Vec::new();
+            let mut sample: Option<&str> = None;
 
             for (i, val_opt) in ca.iter().enumerate() {
                 if let Some(val) = val_opt {
                     if !self.pattern.is_match(val) {
                         failed_rows.push(i);
+                        if sample.is_none() {
+                            sample = Some(val);
+                        }
                     }
                 }
             }
 
             if !failed_rows.is_empty() {
+                let offender = sample
+                    .map(|value| format!(" (first offender: '{}')", truncate_sample(value)))
+                    .unwrap_or_default();
                 errors.push(ValidationError::single(
                     column_name,
                     self.name(),
                     failed_rows,
                     format!(
-                        "Values in '{}' do not match pattern '{}'",
-                        column_name,
+                        "does not match pattern '{}'{offender}",
                         self.pattern.as_str()
                     ),
                 ));
             }
         } else {
-            errors.push(type_mismatch_error(column_name, self.name(), "String"));
+            errors.push(type_mismatch_error(column_name, self.name(), "a String"));
         }
 
         errors
@@ -337,7 +339,7 @@ pub struct OneOfString {
 
 impl Check for OneOfString {
     fn name(&self) -> &str {
-        "OneOfString"
+        "one_of"
     }
     fn spec(&self) -> CheckSpec {
         let mut values: Vec<String> = self.allowed_values.iter().cloned().collect();
@@ -349,28 +351,36 @@ impl Check for OneOfString {
 
         if let Ok(ca) = series.str() {
             let mut failed_rows = Vec::new();
+            let mut offenders: Vec<&str> = Vec::new();
 
             for (i, val_opt) in ca.iter().enumerate() {
                 if let Some(val) = val_opt {
                     if !self.allowed_values.contains(val) {
                         failed_rows.push(i);
+                        if offenders.len() < SAMPLE_VALUES {
+                            offenders.push(val);
+                        }
                     }
                 }
             }
 
             if !failed_rows.is_empty() {
+                let mut allowed: Vec<&str> =
+                    self.allowed_values.iter().map(String::as_str).collect();
+                allowed.sort_unstable();
                 errors.push(ValidationError::single(
                     column_name,
                     self.name(),
                     failed_rows,
                     format!(
-                        "Values in '{}' are not part of the allowed set",
-                        column_name
+                        "values {} are not one of {}",
+                        render_quoted_list(&offenders, SAMPLE_VALUES),
+                        render_quoted_list(&allowed, SAMPLE_ALLOWED),
                     ),
                 ));
             }
         } else {
-            errors.push(type_mismatch_error(column_name, self.name(), "String"));
+            errors.push(type_mismatch_error(column_name, self.name(), "a String"));
         }
 
         errors
@@ -477,7 +487,7 @@ fn float_not_in_rows(values: &Float64Chunked, allowed: &[f64]) -> Vec<usize> {
 
 impl Check for OneOfNumericValues {
     fn name(&self) -> &str {
-        "OneOfNumeric"
+        "one_of"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::OneOfNumeric(self.allowed_values.clone())
@@ -493,7 +503,7 @@ impl Check for OneOfNumericValues {
                     return vec![type_mismatch_error(
                         column_name,
                         self.name(),
-                        "Boolean, a numeric type, or temporal",
+                        "numeric, boolean, or temporal",
                     )]
                 }
             },
@@ -521,16 +531,13 @@ impl Check for OneOfNumericValues {
                 column_name,
                 self.name(),
                 rows,
-                format!(
-                    "Values in '{}' are not part of the allowed set",
-                    column_name
-                ),
+                format!("values are not one of {}", render_float_list(&allow_f)),
             )],
             Ok(_) => Vec::new(),
             Err(_) => vec![type_mismatch_error(
                 column_name,
                 self.name(),
-                "Boolean, a numeric type, or temporal",
+                "numeric, boolean, or temporal",
             )],
         }
     }
@@ -546,7 +553,7 @@ pub struct StrLengthBetween {
 
 impl Check for StrLengthBetween {
     fn name(&self) -> &str {
-        "StrLengthBetween"
+        "str_length_between"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::StrLengthBetween(self.min_len, self.max_len)
@@ -572,13 +579,13 @@ impl Check for StrLengthBetween {
                     self.name(),
                     failed_rows,
                     format!(
-                        "Values in '{}' must have length between {} and {} characters",
-                        column_name, self.min_len, self.max_len
+                        "value length must be between {} and {} characters",
+                        self.min_len, self.max_len
                     ),
                 ));
             }
         } else {
-            errors.push(type_mismatch_error(column_name, self.name(), "String"));
+            errors.push(type_mismatch_error(column_name, self.name(), "a String"));
         }
 
         errors
@@ -591,7 +598,7 @@ pub struct NotBlank;
 
 impl Check for NotBlank {
     fn name(&self) -> &str {
-        "NotBlank"
+        "not_blank"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::NotBlank
@@ -615,14 +622,11 @@ impl Check for NotBlank {
                     column_name,
                     self.name(),
                     failed_rows,
-                    format!(
-                        "Values in '{}' must not be blank (empty or whitespace-only)",
-                        column_name
-                    ),
+                    "value must not be blank (empty or whitespace-only)",
                 ));
             }
         } else {
-            errors.push(type_mismatch_error(column_name, self.name(), "String"));
+            errors.push(type_mismatch_error(column_name, self.name(), "a String"));
         }
 
         errors
@@ -636,7 +640,7 @@ pub struct StartsWith {
 
 impl Check for StartsWith {
     fn name(&self) -> &str {
-        "StartsWith"
+        "starts_with"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::StartsWith(self.prefix.clone())
@@ -660,14 +664,11 @@ impl Check for StartsWith {
                     column_name,
                     self.name(),
                     failed_rows,
-                    format!(
-                        "Values in '{}' must start with '{}'",
-                        column_name, self.prefix
-                    ),
+                    format!("value must start with '{}'", self.prefix),
                 ));
             }
         } else {
-            errors.push(type_mismatch_error(column_name, self.name(), "String"));
+            errors.push(type_mismatch_error(column_name, self.name(), "a String"));
         }
 
         errors
@@ -681,7 +682,7 @@ pub struct EndsWith {
 
 impl Check for EndsWith {
     fn name(&self) -> &str {
-        "EndsWith"
+        "ends_with"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::EndsWith(self.suffix.clone())
@@ -705,14 +706,11 @@ impl Check for EndsWith {
                     column_name,
                     self.name(),
                     failed_rows,
-                    format!(
-                        "Values in '{}' must end with '{}'",
-                        column_name, self.suffix
-                    ),
+                    format!("value must end with '{}'", self.suffix),
                 ));
             }
         } else {
-            errors.push(type_mismatch_error(column_name, self.name(), "String"));
+            errors.push(type_mismatch_error(column_name, self.name(), "a String"));
         }
 
         errors
@@ -720,6 +718,60 @@ impl Check for EndsWith {
 }
 
 // --- Helper Functions ---
+
+/// Maximum distinct offending values rendered inside an error message.
+const SAMPLE_VALUES: usize = 3;
+/// Maximum allowed-set values rendered inside an error message.
+const SAMPLE_ALLOWED: usize = 8;
+/// Maximum characters of a single offender rendered inside an error message.
+const SAMPLE_VALUE_CHARS: usize = 40;
+
+/// Renders quoted values as a list, collapsing anything past `cap` into an
+/// ellipsis so pathological columns cannot inflate the message.
+fn render_quoted_list(values: &[&str], cap: usize) -> String {
+    let shown = values
+        .iter()
+        .take(cap)
+        .map(|value| format!("'{value}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if values.len() > cap {
+        format!("[{shown}, …]")
+    } else {
+        format!("[{shown}]")
+    }
+}
+
+/// Renders the numeric allowed pool for `one_of` failure messages, capped
+/// the same way as the string variant.
+fn render_float_list(values: &[f64]) -> String {
+    let shown = values
+        .iter()
+        .take(SAMPLE_ALLOWED)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if values.len() > SAMPLE_ALLOWED {
+        format!("[{shown}, …]")
+    } else {
+        format!("[{shown}]")
+    }
+}
+
+/// Truncates a value sample to `SAMPLE_VALUE_CHARS` characters with an
+/// ellipsis marker, so long cells never dominate a failure message.
+fn truncate_sample(value: &str) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    for _ in 0..SAMPLE_VALUE_CHARS {
+        let Some(c) = chars.next() else { break };
+        out.push(c);
+    }
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
 
 /// Whether a dtype can be coerced to f64 for numeric checks and sampling.
 pub(crate) fn is_supported_numeric_dtype(dtype: &DataType) -> bool {
@@ -1000,7 +1052,7 @@ pub(crate) fn type_mismatch_error(
         column,
         check,
         vec![],
-        format!("Failed to dynamically cast column to {}", expected_type),
+        format!("column is not {expected_type}"),
     )
 }
 
@@ -1067,7 +1119,7 @@ pub struct ListLenBetween {
 
 impl Check for ListLenBetween {
     fn name(&self) -> &str {
-        "ListLenBetween"
+        "list_len_between"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::ListLenBetween(self.min_len, self.max_len)
@@ -1092,8 +1144,8 @@ impl Check for ListLenBetween {
                         self.name(),
                         failed,
                         format!(
-                            "Lists in '{}' must have length between {} and {}",
-                            column_name, self.min_len, self.max_len
+                            "list length must be between {} and {}",
+                            self.min_len, self.max_len
                         ),
                     )]
                 }
@@ -1101,7 +1153,7 @@ impl Check for ListLenBetween {
             Err(_) => vec![type_mismatch_error(
                 column_name,
                 self.name(),
-                "List or Array",
+                "a List or Array",
             )],
         }
     }
@@ -1112,7 +1164,7 @@ pub struct ListNotEmpty;
 
 impl Check for ListNotEmpty {
     fn name(&self) -> &str {
-        "ListNotEmpty"
+        "list_not_empty"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::ListNotEmpty
@@ -1135,14 +1187,14 @@ impl Check for ListNotEmpty {
                         column_name,
                         self.name(),
                         failed,
-                        format!("Lists in '{}' must not be empty", column_name),
+                        "list must not be empty",
                     )]
                 }
             }
             Err(_) => vec![type_mismatch_error(
                 column_name,
                 self.name(),
-                "List or Array",
+                "a List or Array",
             )],
         }
     }
@@ -1158,7 +1210,7 @@ pub struct StructFieldCheck {
 
 impl Check for StructFieldCheck {
     fn name(&self) -> &str {
-        "StructField"
+        "struct_field"
     }
     fn spec(&self) -> CheckSpec {
         CheckSpec::StructField(
@@ -1170,7 +1222,7 @@ impl Check for StructFieldCheck {
         let struct_ca = match series.struct_() {
             Ok(ca) => ca,
             Err(_) => {
-                return vec![type_mismatch_error(column_name, self.name(), "Struct")];
+                return vec![type_mismatch_error(column_name, self.name(), "a Struct")];
             }
         };
         let field_series = match struct_ca.field_by_name(self.field.as_str()) {
@@ -1246,7 +1298,7 @@ mod tests {
         let errors = check.validate("value", &series);
 
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("numeric type"));
+        assert!(errors[0].message.contains("column is not a numeric type"));
     }
 
     #[test]
@@ -1391,7 +1443,7 @@ mod tests {
         let errors = check.validate("value", &series);
 
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("List or Array"));
+        assert!(errors[0].message.contains("a List or Array"));
     }
 
     #[test]
@@ -1459,7 +1511,7 @@ mod tests {
     fn not_blank_rejects_non_string_columns() {
         let series = Series::new("s".into(), [1i64, 2]);
         let errors = NotBlank.validate("s", &series);
-        assert!(errors[0].message.contains("String"));
+        assert!(errors[0].message.contains("column is not a String"));
     }
 
     #[test]
@@ -1536,7 +1588,7 @@ mod tests {
 
         let errors = check.validate("s", &series);
 
-        assert!(errors[0].message.contains("Boolean"));
+        assert!(errors[0].message.contains("numeric, boolean"));
     }
 
     #[test]
