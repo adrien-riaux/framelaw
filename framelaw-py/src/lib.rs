@@ -972,7 +972,17 @@ pub struct PyValidationError {
 pub struct PyValidationReport {
     #[pyo3(get)]
     errors: Vec<PyValidationError>,
+    /// Native errors kept for summary formatting so Python and Rust never
+    /// duplicate the presentation logic.
+    raw: Vec<ValidationError>,
 }
+
+pyo3::create_exception!(
+    framelaw,
+    PySchemaError,
+    pyo3::exceptions::PyValueError,
+    "Raised when a DataFrame does not match its schema."
+);
 
 #[pymethods]
 impl PyValidationReport {
@@ -984,29 +994,12 @@ impl PyValidationReport {
         if self.errors.is_empty() {
             Ok(())
         } else {
-            Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Validation failed:\n{}",
-                self.summary()
-            )))
+            Err(PySchemaError::new_err(report_summary_text(&self.raw)))
         }
     }
 
     fn summary(&self) -> String {
-        self.errors
-            .iter()
-            .map(|error| {
-                let location = if error.columns.len() > 1 {
-                    format!("Columns '{}'", error.columns.join("', '"))
-                } else {
-                    format!("Column '{}'", error.column)
-                };
-                format!(
-                    "{}: rows {:?}, check '{}': {}",
-                    location, error.rows, error.check, error.message
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        report_summary_text(&self.raw)
     }
 
     fn to_dataframe(&self) -> PyResult<PyDataFrame> {
@@ -1053,8 +1046,18 @@ impl PyValidationReport {
     }
 }
 
+/// Formats a failure report using the single formatter in the core crate,
+/// so Python and Rust summaries stay identical.
+fn report_summary_text(errors: &[ValidationError]) -> String {
+    let report = framelaw_core::errors::ValidationReport {
+        errors: errors.to_vec(),
+    };
+    report.summary()
+}
+
 impl From<framelaw_core::errors::ValidationReport> for PyValidationReport {
     fn from(report: framelaw_core::errors::ValidationReport) -> Self {
+        let raw: Vec<ValidationError> = report.errors.clone();
         Self {
             errors: report
                 .errors
@@ -1070,6 +1073,7 @@ impl From<framelaw_core::errors::ValidationReport> for PyValidationReport {
                     }
                 })
                 .collect(),
+            raw,
         }
     }
 }
@@ -2027,12 +2031,8 @@ impl PySchema {
         if report.is_valid() {
             Ok(None)
         } else if raise {
-            use pyo3::exceptions::PyValueError;
             let report = PyValidationReport::from(report);
-            Err(PyValueError::new_err(format!(
-                "Validation failed:\n{}",
-                report.summary()
-            )))
+            Err(PySchemaError::new_err(report.summary()))
         } else {
             Ok(Some(PyValidationReport::from(report)))
         }
@@ -2285,17 +2285,14 @@ fn run_custom_checks(
         };
         let message = if total > rows.len() {
             format!(
-                "Custom check '{}' failed for {} row(s); first {} at {:?}",
+                "custom check '{}' failed for {} row(s); first {} at {:?}",
                 check.name,
                 total,
                 rows.len(),
                 rows
             )
         } else {
-            format!(
-                "Custom check '{}' failed for {} row(s) at {:?}",
-                check.name, total, rows
-            )
+            format!("custom check '{}' failed for {} row(s)", check.name, total)
         };
         errors.push(ValidationError::multi(
             columns,
@@ -2465,7 +2462,7 @@ fn materialize_frame(value: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
 }
 
 #[pymodule]
-fn _framelaw(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _framelaw(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCheck>()?;
     m.add_class::<PyDataFrameCheck>()?;
     m.add_class::<PyColumn>()?;
@@ -2473,6 +2470,7 @@ fn _framelaw(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySchema>()?;
     m.add_class::<PyValidationError>()?;
     m.add_class::<PyValidationReport>()?;
+    m.add("SchemaError", py.get_type::<PySchemaError>())?;
 
     m.add_function(wrap_pyfunction!(not_null, m)?)?;
     m.add_function(wrap_pyfunction!(unique_values, m)?)?;

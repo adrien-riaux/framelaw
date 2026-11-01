@@ -11,9 +11,8 @@ Polars, exposed to Python.
 
 Framelaw validates Polars `DataFrame`s against a schema — column types,
 nullability, value constraints, and cross-column rules — in parallel Rust,
-behind a Pandera-like Python API. On a 2M-row mixed workload it validates at
-≈30M rows/s (Apple Silicon; reproduce with `scripts/benchmark.py` on a
-`make build-release` install).
+behind a Python API. On a 2M-row mixed workload it validates at
+≈30M rows/s.
 
 ## Features
 

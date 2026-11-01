@@ -1,6 +1,6 @@
 use polars::prelude::{DataFrame, DataType};
 
-use crate::checks::Check;
+use crate::checks::{Check, CheckSpec};
 use crate::errors::ValidationError;
 
 pub struct ColumnSpec {
@@ -19,9 +19,9 @@ impl ColumnSpec {
             Err(_) => {
                 errors.push(ValidationError::single(
                     &self.name,
-                    "ColumnExists",
+                    "column_exists",
                     vec![],
-                    format!("Column '{}' is missing from DataFrame", self.name),
+                    "column is missing from the DataFrame",
                 ));
                 return errors;
             }
@@ -31,14 +31,9 @@ impl ColumnSpec {
         if !dtype_matches(&self.dtype, series.dtype()) && !null_column_is_compatible {
             errors.push(ValidationError::single(
                 &self.name,
-                "Dtype",
+                "dtype",
                 vec![],
-                format!(
-                    "Column '{}' has dtype {}, expected {}",
-                    self.name,
-                    series.dtype(),
-                    self.dtype
-                ),
+                format!("dtype is {}, expected {}", series.dtype(), self.dtype),
             ));
             return errors;
         }
@@ -53,13 +48,9 @@ impl ColumnSpec {
 
             errors.push(ValidationError::single(
                 &self.name,
-                "NotNull",
+                "not_null",
                 rows,
-                format!(
-                    "Found {} null values in '{}'",
-                    series.null_count(),
-                    self.name
-                ),
+                format!("found {} null value(s)", series.null_count()),
             ));
         }
 
@@ -68,7 +59,7 @@ impl ColumnSpec {
             // an explicit NotNull check must still report every row instead
             // of being silently skipped.
             for check in &self.checks {
-                if check.name() == "NotNull" {
+                if matches!(check.spec(), CheckSpec::NotNull) {
                     errors.append(&mut check.validate(&self.name, series));
                 }
             }
@@ -77,7 +68,7 @@ impl ColumnSpec {
 
         // Run all individual checks against the series
         for check in &self.checks {
-            if !self.nullable && check.name() == "NotNull" {
+            if !self.nullable && matches!(check.spec(), CheckSpec::NotNull) {
                 continue;
             }
 
@@ -131,7 +122,7 @@ mod tests {
         let errors = column.validate(&df);
 
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].check, "Dtype");
+        assert_eq!(errors[0].check, "dtype");
         assert!(errors[0].rows.is_empty());
     }
 
@@ -152,7 +143,7 @@ mod tests {
         let errors = column.validate(&df);
 
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].check, "NotNull");
+        assert_eq!(errors[0].check, "not_null");
         assert_eq!(errors[0].rows, vec![1]);
     }
 
@@ -171,7 +162,7 @@ mod tests {
         let errors = column.validate(&df);
 
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].check, "NotNull");
+        assert_eq!(errors[0].check, "not_null");
         assert_eq!(errors[0].rows, vec![0, 1, 2]);
     }
 

@@ -198,7 +198,7 @@ def test_custom_checks_raise_when_not_lazy() -> None:
         dataframe_checks=[fl.checks.table.check_expr(pl.col("a") > 10, name="big")],
     )
 
-    with pytest.raises(ValueError, match="Custom check 'big'"):
+    with pytest.raises(ValueError, match="custom check 'big'"):
         schema.validate(pl.DataFrame({"a": [1, 20]}))
 
 

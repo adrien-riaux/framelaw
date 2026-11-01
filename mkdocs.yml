@@ -58,6 +58,7 @@ nav:
       - Checks: checks.md
       - Cross-column checks: cross-column-checks.md
       - Custom checks: custom-checks.md
+      - Decorator: decorator.md
       - Nested types: nested-types.md
       - Error reports: error-reports.md
       - Lazy & chunked validation: lazy-validation.md

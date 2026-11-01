@@ -131,8 +131,8 @@ class Schema:
             df: The frame to validate. Lazy frames are collected at the
                 validation boundary, or streamed in batches when
                 ``chunk_rows`` is set.
-            raise_on_error: Whether to raise ``ValueError`` on failure.
-                ``None`` resolves to ``not self.lazy``.
+            raise_on_error: Whether to raise :class:`SchemaError` on
+                failure. ``None`` resolves to ``not self.lazy``.
             chunk_rows: Validate in batches of this many rows. Chunked
                 validation always returns a report instead of raising, and
                 dataset-wide checks (``unique``, ``unique_together``,
@@ -140,12 +140,13 @@ class Schema:
 
         Returns:
             ``None`` when the frame is valid. When invalid, raises
-            ``ValueError`` if raising, otherwise returns a
+            :class:`SchemaError` if raising, otherwise returns a
             :class:`ValidationReport`.
 
         Raises:
-            ValueError: If the frame is invalid and raising is enabled, or if
-                ``chunk_rows`` is zero.
+            SchemaError: If the frame is invalid and raising is enabled.
+                Subclasses ``ValueError``.
+            ValueError: If ``chunk_rows`` is zero.
             TypeError: If ``df`` is neither a Polars ``DataFrame`` nor
                 ``LazyFrame``.
         """
@@ -277,6 +278,23 @@ class ValidationError:
     rows: list[int]
     message: str
 
+class SchemaError(ValueError):
+    """Raised when a DataFrame does not match its schema.
+
+    Subclasses ``ValueError``, so existing ``except ValueError`` blocks
+    keep working. The failure report is formatted into the message.
+
+    Examples:
+        >>> import polars as pl
+        >>> import framelaw as fl
+        >>> schema = fl.Schema({"age": fl.Column(pl.Int64, checks=[fl.checks.column.gt(0)])})
+        >>> try:
+        ...     schema.validate(pl.DataFrame({"age": [-1]}))
+        ... except fl.SchemaError as error:
+        ...     print(str(error).splitlines()[0])
+        Validation failed with 1 error
+    """
+
 class ValidationReport:
     """Structured result of a validation that did not raise.
 
@@ -307,7 +325,7 @@ class ValidationReport:
         """
 
     def raise_if_invalid(self) -> None:
-        """Raise ``ValueError`` with the summary, or return ``None`` if valid."""
+        """Raise ``SchemaError`` with the summary, or return ``None`` if valid."""
 
 def not_null() -> Check:
     """Reject null values in the column.
