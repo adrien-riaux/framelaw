@@ -351,6 +351,22 @@ def test_report_to_dataframe_expands_failing_rows() -> None:
     assert report_dataframe.select("row").to_series().to_list() == [1, 2]
 
 
+def test_report_to_dataframe_max_rows_caps_each_error() -> None:
+    """Optional ``max_rows`` caps the expanded rows per error."""
+    schema = fl.Schema(
+        {"value": fl.Column(pl.Int64, nullable=False, checks=[fl.checks.column.gt(10)])}
+    )
+    dataframe = pl.DataFrame({"value": [-1, -2, -3, -4]})
+
+    report = schema.validate(dataframe, raise_on_error=False)
+    assert report is not None
+    assert report.to_dataframe().height == 4
+
+    capped = report.to_dataframe(max_rows=2)
+    assert capped.height == 2
+    assert capped.select("row").to_series().to_list() == [0, 1]
+
+
 def test_pydantic_scalar_constraints_and_optional_fields() -> None:
     """Map supported Pydantic v2 fields into native framelaw checks."""
 

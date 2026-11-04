@@ -1,6 +1,8 @@
 use polars::prelude::*;
+use polars_arrow::array::Array;
 use regex::Regex;
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use crate::errors::ValidationError;
 
@@ -332,9 +334,50 @@ impl Check for MatchesRegex {
     }
 }
 
+/// Rows failing a per-value string predicate (`true` means the row
+/// violates the check). Null-free chunks take the raw-values fast path
+/// (no per-element null check); chunks with nulls keep the `Option`-based
+/// iterator so null rows stay skipped.
+fn string_fails(ca: &StringChunked, mut fails: impl FnMut(&str) -> bool) -> Vec<usize> {
+    let mut rows = Vec::new();
+    let mut base = 0usize;
+    for chunk in ca.downcast_iter() {
+        let has_nulls = chunk
+            .validity()
+            .is_some_and(|bitmap| bitmap.unset_bits() > 0);
+        if has_nulls {
+            for (offset, value) in chunk.iter().enumerate() {
+                if let Some(val) = value {
+                    if fails(val) {
+                        rows.push(base + offset);
+                    }
+                }
+            }
+        } else {
+            for (offset, value) in chunk.values_iter().enumerate() {
+                if fails(value) {
+                    rows.push(base + offset);
+                }
+            }
+        }
+        base += chunk.len();
+    }
+    rows
+}
+
 /// Checks that all string values are within an allowed set.
 pub struct OneOfString {
     pub allowed_values: HashSet<String>,
+}
+
+impl OneOfString {
+    /// Allowed values in sorted order: the canonical message and spec
+    /// rendering, computed on demand (the sets are tiny).
+    fn sorted_allowed(&self) -> Vec<&str> {
+        let mut allowed: Vec<&str> = self.allowed_values.iter().map(String::as_str).collect();
+        allowed.sort_unstable();
+        allowed
+    }
 }
 
 impl Check for OneOfString {
@@ -350,24 +393,20 @@ impl Check for OneOfString {
         let mut errors = Vec::new();
 
         if let Ok(ca) = series.str() {
-            let mut failed_rows = Vec::new();
-            let mut offenders: Vec<&str> = Vec::new();
-
-            for (i, val_opt) in ca.iter().enumerate() {
-                if let Some(val) = val_opt {
-                    if !self.allowed_values.contains(val) {
-                        failed_rows.push(i);
-                        if offenders.len() < SAMPLE_VALUES {
-                            offenders.push(val);
-                        }
-                    }
-                }
-            }
+            // Hash-set membership is O(1) per row regardless of the size
+            // of the allowed set; the Polars engine path (`is_in`) was
+            // measured neutral on top of the scan, so the direct loop wins.
+            let failed_rows = string_fails(ca, |val| !self.allowed_values.contains(val));
 
             if !failed_rows.is_empty() {
-                let mut allowed: Vec<&str> =
-                    self.allowed_values.iter().map(String::as_str).collect();
-                allowed.sort_unstable();
+                // Offenders keep the historical message shape: the values
+                // of the first failing rows in row order, not distinct
+                // values.
+                let offenders: Vec<&str> = failed_rows
+                    .iter()
+                    .take(SAMPLE_VALUES)
+                    .filter_map(|&row| ca.get(row))
+                    .collect();
                 errors.push(ValidationError::single(
                     column_name,
                     self.name(),
@@ -375,7 +414,7 @@ impl Check for OneOfString {
                     format!(
                         "values {} are not one of {}",
                         render_quoted_list(&offenders, SAMPLE_VALUES),
-                        render_quoted_list(&allowed, SAMPLE_ALLOWED),
+                        render_quoted_list(&self.sorted_allowed(), SAMPLE_ALLOWED),
                     ),
                 ));
             }
@@ -387,29 +426,30 @@ impl Check for OneOfString {
     }
 }
 
-/// Checks that all numeric/boolean values are within an allowed set.
-pub struct OneOfNumericValues {
-    pub allowed_values: Vec<f64>,
+/// Exact membership sets for `one_of`: integers within the `i128` and
+/// `u128` domains, plus a sorted deduplicated `f64` pool for float rows.
+/// A value enters an integer set only when the `f64 -> int -> f64`
+/// round-trip is exact, so integer equality never goes through a lossy
+/// comparison.
+#[derive(Default)]
+pub struct ExactMembership {
+    signed: HashSet<i128>,
+    unsigned: HashSet<u128>,
+    floats: Vec<f64>,
 }
 
-impl OneOfNumericValues {
-    /// Exact membership sets derived from the allowed values: integers
-    /// within the i128 and u128 domains, plus an f64 pool for float rows.
-    /// A value enters an integer set only when the `f64 -> int -> f64`
-    /// round-trip is exact, so integer equality never goes through a
-    /// lossy comparison.
-    fn exact_sets(&self) -> (HashSet<i128>, HashSet<u128>, Vec<f64>) {
-        let mut signed = HashSet::with_capacity(self.allowed_values.len());
-        let mut unsigned = HashSet::with_capacity(self.allowed_values.len());
-        let mut floats: Vec<f64> = self
-            .allowed_values
+impl ExactMembership {
+    fn build(allowed_values: &[f64]) -> Self {
+        let mut signed = HashSet::with_capacity(allowed_values.len());
+        let mut unsigned = HashSet::with_capacity(allowed_values.len());
+        let mut floats: Vec<f64> = allowed_values
             .iter()
             .copied()
             .filter(|value| value.is_finite())
             .collect();
         floats.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
         floats.dedup();
-        for value in &self.allowed_values {
+        for value in allowed_values {
             if let Some(i) = exact_i128_value(*value) {
                 signed.insert(i);
             }
@@ -417,7 +457,48 @@ impl OneOfNumericValues {
                 unsigned.insert(u);
             }
         }
-        (signed, unsigned, floats)
+        Self {
+            signed,
+            unsigned,
+            floats,
+        }
+    }
+
+    pub fn signed(&self) -> &HashSet<i128> {
+        &self.signed
+    }
+
+    pub fn unsigned(&self) -> &HashSet<u128> {
+        &self.unsigned
+    }
+
+    pub fn floats(&self) -> &[f64] {
+        &self.floats
+    }
+}
+
+/// Checks that all numeric/boolean values are within an allowed set.
+pub struct OneOfNumericValues {
+    /// The allowed values as given. Kept for `spec()` round-trips.
+    allowed_values: Vec<f64>,
+    /// Exact membership resolved once per check instance instead of once
+    /// per validation call; `validate` needs only `&self` to read it.
+    exact_members: OnceLock<ExactMembership>,
+}
+
+impl OneOfNumericValues {
+    pub fn new(allowed_values: Vec<f64>) -> Self {
+        Self {
+            allowed_values,
+            exact_members: OnceLock::new(),
+        }
+    }
+
+    /// Exact membership sets derived from the allowed values, built lazily
+    /// on first validation and reused afterwards.
+    fn exact_sets(&self) -> &ExactMembership {
+        self.exact_members
+            .get_or_init(|| ExactMembership::build(&self.allowed_values))
     }
 }
 
@@ -493,7 +574,7 @@ impl Check for OneOfNumericValues {
         CheckSpec::OneOfNumeric(self.allowed_values.clone())
     }
     fn validate(&self, column_name: &str, series: &Series) -> Vec<ValidationError> {
-        let (allow_i, allow_u, allow_f) = self.exact_sets();
+        let members = self.exact_sets();
         // Booleans compare after widening to Int64, matching the generation
         // side where `[true]` becomes the numeric pool `{1.0}`.
         let bool_wide: Option<Series> = match series.dtype() {
@@ -513,15 +594,16 @@ impl Check for OneOfNumericValues {
         let rows: PolarsResult<Vec<usize>> = (|| match int_domain(target.dtype()) {
             Some(IntDomain::I128) => Ok(int_not_in_rows_i128(
                 target.cast(&DataType::Int128)?.i128()?,
-                &allow_i,
+                members.signed(),
             )),
             Some(IntDomain::U128) => Ok(int_not_in_rows_u128(
                 target.cast(&DataType::UInt128)?.u128()?,
-                &allow_u,
+                members.unsigned(),
             )),
-            None if is_supported_numeric_dtype(target.dtype()) => {
-                Ok(float_not_in_rows(&numeric_series(target)?, &allow_f))
-            }
+            None if is_supported_numeric_dtype(target.dtype()) => Ok(float_not_in_rows(
+                &numeric_series(target)?,
+                members.floats(),
+            )),
             None => Err(PolarsError::ComputeError(
                 "expected a membership type".into(),
             )),
@@ -531,7 +613,10 @@ impl Check for OneOfNumericValues {
                 column_name,
                 self.name(),
                 rows,
-                format!("values are not one of {}", render_float_list(&allow_f)),
+                format!(
+                    "values are not one of {}",
+                    render_float_list(members.floats())
+                ),
             )],
             Ok(_) => Vec::new(),
             Err(_) => vec![type_mismatch_error(
@@ -562,16 +647,11 @@ impl Check for StrLengthBetween {
         let mut errors = Vec::new();
 
         if let Ok(ca) = series.str() {
-            let mut failed_rows = Vec::new();
-
-            for (i, val_opt) in ca.iter().enumerate() {
-                if let Some(val) = val_opt {
-                    let len = val.chars().count();
-                    if len < self.min_len || len > self.max_len {
-                        failed_rows.push(i);
-                    }
-                }
-            }
+            // Polars counts UTF-8 characters vectorized (SIMD), avoiding
+            // the per-row char walk of the old loop.
+            let lengths = ca.str_len_chars();
+            let fail_mask = (&lengths.lt(self.min_len as u32)) | (&lengths.gt(self.max_len as u32));
+            let failed_rows = get_true_indices(&fail_mask);
 
             if !failed_rows.is_empty() {
                 errors.push(ValidationError::single(
@@ -607,16 +687,7 @@ impl Check for NotBlank {
         let mut errors = Vec::new();
 
         if let Ok(ca) = series.str() {
-            let mut failed_rows = Vec::new();
-
-            for (i, val_opt) in ca.iter().enumerate() {
-                if let Some(val) = val_opt {
-                    if val.trim().is_empty() {
-                        failed_rows.push(i);
-                    }
-                }
-            }
-
+            let failed_rows = string_fails(ca, |val| val.trim().is_empty());
             if !failed_rows.is_empty() {
                 errors.push(ValidationError::single(
                     column_name,
@@ -649,16 +720,7 @@ impl Check for StartsWith {
         let mut errors = Vec::new();
 
         if let Ok(ca) = series.str() {
-            let mut failed_rows = Vec::new();
-
-            for (i, val_opt) in ca.iter().enumerate() {
-                if let Some(val) = val_opt {
-                    if !val.starts_with(self.prefix.as_str()) {
-                        failed_rows.push(i);
-                    }
-                }
-            }
-
+            let failed_rows = string_fails(ca, |val| !val.starts_with(self.prefix.as_str()));
             if !failed_rows.is_empty() {
                 errors.push(ValidationError::single(
                     column_name,
@@ -691,16 +753,7 @@ impl Check for EndsWith {
         let mut errors = Vec::new();
 
         if let Ok(ca) = series.str() {
-            let mut failed_rows = Vec::new();
-
-            for (i, val_opt) in ca.iter().enumerate() {
-                if let Some(val) = val_opt {
-                    if !val.ends_with(self.suffix.as_str()) {
-                        failed_rows.push(i);
-                    }
-                }
-            }
-
+            let failed_rows = string_fails(ca, |val| !val.ends_with(self.suffix.as_str()));
             if !failed_rows.is_empty() {
                 errors.push(ValidationError::single(
                     column_name,
@@ -1034,12 +1087,42 @@ pub(crate) fn numeric_series(series: &Series) -> PolarsResult<Float64Chunked> {
         .cloned()
 }
 
+/// Shared implementation of `get_true_indices` / `get_false_indices`.
+/// Null-free chunks take the raw-bitmap path (no null check per element);
+/// chunks with nulls keep the `Option`-based iterator so nulls stay skipped.
+fn scan_mask(mask: &BooleanChunked, take: bool) -> Vec<usize> {
+    let mut rows = Vec::new();
+    let mut base = 0usize;
+    for chunk in mask.downcast_iter() {
+        let has_nulls = chunk
+            .validity()
+            .is_some_and(|bitmap| bitmap.unset_bits() > 0);
+        if has_nulls {
+            for (offset, value) in chunk.iter().enumerate() {
+                if value == Some(take) {
+                    rows.push(base + offset);
+                }
+            }
+        } else {
+            for (offset, value) in chunk.values_iter().enumerate() {
+                if value == take {
+                    rows.push(base + offset);
+                }
+            }
+        }
+        base += chunk.len();
+    }
+    rows
+}
+
 /// Retrieves the raw row indexing where the BooleanChunked mask answers true.
 pub(crate) fn get_true_indices(mask: &BooleanChunked) -> Vec<usize> {
-    mask.iter()
-        .enumerate()
-        .filter_map(|(i, b)| if let Some(true) = b { Some(i) } else { None })
-        .collect()
+    scan_mask(mask, true)
+}
+
+/// Rows where the mask answers false; nulls are skipped.
+pub(crate) fn get_false_indices(mask: &BooleanChunked) -> Vec<usize> {
+    scan_mask(mask, false)
 }
 
 /// Returns a boilerplate error for failed typecasts.
@@ -1078,9 +1161,7 @@ pub fn check_from_spec(spec: &CheckSpec) -> PolarsResult<Box<dyn Check>> {
         CheckSpec::OneOf(values) => Box::new(OneOfString {
             allowed_values: values.iter().cloned().collect(),
         }),
-        CheckSpec::OneOfNumeric(values) => Box::new(OneOfNumericValues {
-            allowed_values: values.clone(),
-        }),
+        CheckSpec::OneOfNumeric(values) => Box::new(OneOfNumericValues::new(values.clone())),
         CheckSpec::StrLengthBetween(min_len, max_len) => Box::new(StrLengthBetween {
             min_len: *min_len,
             max_len: *max_len,
@@ -1548,9 +1629,7 @@ mod tests {
         // row; the integer path reports it.
         let base: i64 = 1 << 54;
         let series = Series::new("n".into(), [base - 1, base]);
-        let check = OneOfNumericValues {
-            allowed_values: vec![base as f64],
-        };
+        let check = OneOfNumericValues::new(vec![base as f64]);
 
         let errors = check.validate("n", &series);
 
@@ -1564,15 +1643,9 @@ mod tests {
         let bools = Series::new("b".into(), [true, false, true]);
         let nullable = Series::new("n".into(), [Some(2i32), None, Some(4), Some(7)]);
 
-        let float_check = OneOfNumericValues {
-            allowed_values: vec![0.5, 1.5],
-        };
-        let bool_check = OneOfNumericValues {
-            allowed_values: vec![1.0],
-        };
-        let int_check = OneOfNumericValues {
-            allowed_values: vec![2.0, 4.0],
-        };
+        let float_check = OneOfNumericValues::new(vec![0.5, 1.5]);
+        let bool_check = OneOfNumericValues::new(vec![1.0]);
+        let int_check = OneOfNumericValues::new(vec![2.0, 4.0]);
 
         assert_eq!(collect_rows(&float_check, &floats), vec![1]);
         assert_eq!(collect_rows(&bool_check, &bools), vec![1]);
@@ -1582,9 +1655,7 @@ mod tests {
     #[test]
     fn one_of_numeric_rejects_string_columns() {
         let series = string_series(&["1", "2"]);
-        let check = OneOfNumericValues {
-            allowed_values: vec![1.0],
-        };
+        let check = OneOfNumericValues::new(vec![1.0]);
 
         let errors = check.validate("s", &series);
 
@@ -1594,9 +1665,7 @@ mod tests {
     #[test]
     fn one_of_numeric_empty_allowed_set_fails_every_value() {
         let series = Series::new("n".into(), [1i64, 2]);
-        let check = OneOfNumericValues {
-            allowed_values: vec![],
-        };
+        let check = OneOfNumericValues::new(vec![]);
 
         let errors = check.validate("n", &series);
         assert_eq!(errors.len(), 1);
@@ -1609,9 +1678,7 @@ mod tests {
         // it must not be rounded into the member set.
         let allowed = vec![170141183460469231731687303715884105728.0];
         let series = Series::new("n".into(), [i128::MAX]);
-        let check = OneOfNumericValues {
-            allowed_values: allowed,
-        };
+        let check = OneOfNumericValues::new(allowed);
 
         let errors = check.validate("n", &series);
         assert_eq!(errors.len(), 1);

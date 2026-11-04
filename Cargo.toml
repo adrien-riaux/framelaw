@@ -4,3 +4,6 @@ members = [
     "framelaw-py"
 ]
 resolver = "2"
+
+[profile.release]
+strip = true

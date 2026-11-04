@@ -84,6 +84,7 @@ def guard(
         raise ValueError(f"guard received duplicate parameter names: {parameter_names}")
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        """Wraps ``func`` with the argument/return validations."""
         callable_name = getattr(func, "__name__", repr(func))
         signature = inspect.signature(func)
         for name in parameter_names:
@@ -93,17 +94,50 @@ def guard(
                     f"{callable_name!r} (parameters: {list(signature.parameters)})"
                 )
 
+        # Precompute what the usual call shape needs so the common case
+        # validates from `args` directly: ``Signature.bind`` (plus
+        # ``apply_defaults``) costs far more than the validation itself
+        # for small frames.
+        parameters = list(signature.parameters.values())
+        has_var_kind = any(
+            parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            for parameter in parameters
+        )
+        positional_names = [
+            parameter.name
+            for parameter in parameters
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        df_positions = tuple(
+            (name, positional_names.index(name))
+            for name in parameter_names
+            if name in positional_names
+        )
+        fast_call_allowed = not has_var_kind and len(df_positions) == len(parameter_names)
+
+        def validate_arguments(args: tuple[Any, ...]) -> None:
+            """Validates the prepared positional arguments."""
+            for name, index in df_positions:
+                _validate_target(schema, args[index], f"Argument '{name}'", chunk_rows)
+
+        def validate_bound(args: tuple[Any, ...], passed_kwargs: dict[str, Any]) -> None:
+            """Binds arguments with defaults, then validates df parameters."""
+            bound = signature.bind(*args, **passed_kwargs)
+            bound.apply_defaults()
+            for name in parameter_names:
+                _validate_target(schema, bound.arguments[name], f"Argument '{name}'", chunk_rows)
+
         if inspect.iscoroutinefunction(func):
 
             @functools.wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                bound = signature.bind(*args, **kwargs)
-                bound.apply_defaults()
-                for name in parameter_names:
-                    _validate_target(
-                        schema, bound.arguments[name], f"Argument '{name}'", chunk_rows
-                    )
-                result = await func(*args, **kwargs)
+                if fast_call_allowed and not kwargs and len(args) == len(positional_names):
+                    validate_arguments(args)
+                    result = await func(*args)
+                else:
+                    validate_bound(args, kwargs)
+                    result = await func(*args, **kwargs)
                 if returns is not None:
                     _validate_target(returns, result, "Return value", chunk_rows)
                 return result
@@ -112,11 +146,12 @@ def guard(
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            bound = signature.bind(*args, **kwargs)
-            bound.apply_defaults()
-            for name in parameter_names:
-                _validate_target(schema, bound.arguments[name], f"Argument '{name}'", chunk_rows)
-            result = func(*args, **kwargs)
+            if fast_call_allowed and not kwargs and len(args) == len(positional_names):
+                validate_arguments(args)
+                result = func(*args)
+            else:
+                validate_bound(args, kwargs)
+                result = func(*args, **kwargs)
             if returns is not None:
                 _validate_target(returns, result, "Return value", chunk_rows)
             return result

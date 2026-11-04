@@ -1,6 +1,6 @@
 use polars::prelude::{DataFrame, DataType};
 
-use crate::checks::{Check, CheckSpec};
+use crate::checks::{get_true_indices, Check, CheckSpec};
 use crate::errors::ValidationError;
 
 pub struct ColumnSpec {
@@ -39,12 +39,7 @@ impl ColumnSpec {
         }
 
         if !self.nullable && series.null_count() > 0 {
-            let rows = series
-                .is_null()
-                .iter()
-                .enumerate()
-                .filter_map(|(index, value)| value.filter(|is_null| *is_null).map(|_| index))
-                .collect();
+            let rows = get_true_indices(&series.is_null());
 
             errors.push(ValidationError::single(
                 &self.name,

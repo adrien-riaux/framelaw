@@ -70,3 +70,10 @@ failures = report.to_dataframe()
 
 - `column`: primary column; `columns`: `+`-joined list of all columns.
 - `row`: `null` for schema-level errors, otherwise the failing row index.
+
+Pass `max_rows` to cap the number of failing rows expanded per error (the
+first ones in row order are kept):
+
+```python
+failures = report.to_dataframe(max_rows=100)
+```

@@ -3,6 +3,32 @@
 All notable changes to Framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.1] — 2026-11-04
+
+### Added
+
+- `ValidationReport.to_dataframe(max_rows=...)` — optional per-error cap on
+  the number of failing rows expanded into report rows. `None` (default)
+  keeps the previous behavior of expanding every failing row.
+
+### Performance
+
+- Cross-column checks run on chunked arrays instead of per-row value
+  vectors: `Ordered`, `SumColumns`, and `Within` avoid intermediate row
+  vectors, `column_comparison` compares integer/float columns through
+  native Polars kernels (with NaN semantics preserved), `Implies` builds
+  its mask directly, and `Determines` detects conflicts with an eager
+  stable-sort + gather pipeline (scalar fallback for nested/binary
+  dtypes). Cross-column throughput framed accordingly (see benchmarks).
+- Single-column string checks (`str_length_between`, `not_blank`,
+  `starts_with`, `ends_with`) reuse a chunked scan with a raw-values fast
+  path for null-free chunks; string length counts UTF-8 characters with
+  the vectorized Polars kernel instead of a per-row walk.
+- `fl.guard` validates the common all-positional call shape directly from
+  `args`, skipping `Signature.bind` + `apply_defaults` per call.
+- Release builds strip debug symbols: the wheel 6.58MB -> 6.10MB and the
+  extension binary drops to 24MB despite the added engine paths.
+
 ## [0.5.0] — 2026-11-01
 
 ### Added

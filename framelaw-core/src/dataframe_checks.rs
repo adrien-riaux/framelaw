@@ -2,7 +2,7 @@ use polars::prelude::*;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::checks::{get_true_indices, int_domain, numeric_series, IntDomain};
+use crate::checks::{get_false_indices, get_true_indices, int_domain, numeric_series, IntDomain};
 use crate::errors::ValidationError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,20 +86,34 @@ pub(crate) fn is_temporal_dtype(dtype: &DataType) -> bool {
     )
 }
 
-/// Extracts signed values exactly (`i128` domain; temporal via `Int64`).
-pub(crate) fn int128_cells(series: &Series) -> PolarsResult<Vec<Option<i128>>> {
+/// Extracts signed values exactly (`i128` domain; temporal via `Int64`),
+/// as an owned chunked array rather than a materialized `Option<i128>`
+/// vector: the widening costs one cheap column cast, not one heap cell per
+/// row.
+pub(crate) fn int128_ca(series: &Series) -> PolarsResult<Int128Chunked> {
     let base = match series.dtype() {
         DataType::Date | DataType::Datetime(_, _) | DataType::Duration(_) | DataType::Time => {
             series.cast(&DataType::Int64)?
         }
         _ => series.clone(),
     };
-    Ok(base.cast(&DataType::Int128)?.i128()?.iter().collect())
+    Ok(base.cast(&DataType::Int128)?.i128()?.clone())
 }
 
-/// Extracts unsigned values exactly (`u128` domain).
+/// Extracts unsigned values exactly (`u128` domain) as a chunked array.
+pub(crate) fn uint128_ca(series: &Series) -> PolarsResult<UInt128Chunked> {
+    Ok(series.cast(&DataType::UInt128)?.u128()?.clone())
+}
+
+/// Materialized signed cells; the sampling generator works value by value,
+/// where the single-cell read stays natural.
+pub(crate) fn int128_cells(series: &Series) -> PolarsResult<Vec<Option<i128>>> {
+    Ok(int128_ca(series)?.iter().collect())
+}
+
+/// Materialized unsigned cells; see `int128_cells`.
 pub(crate) fn uint128_cells(series: &Series) -> PolarsResult<Vec<Option<u128>>> {
-    Ok(series.cast(&DataType::UInt128)?.u128()?.iter().collect())
+    Ok(uint128_ca(series)?.iter().collect())
 }
 
 /// Total order between a signed and an unsigned value with no rounding:
@@ -113,8 +127,8 @@ pub(crate) fn cmp_mixed_int_uint(signed: i128, unsigned: u128) -> std::cmp::Orde
     }
 }
 
-/// Extracted values for a mixed signed/unsigned comparison.
-type MixedPairValues = (Vec<Option<i128>>, Vec<Option<u128>>);
+/// Chunked exact-value extraction for a mixed signed/unsigned comparison.
+type MixedPairValues = (Int128Chunked, UInt128Chunked);
 
 /// Declarative comparison between two columns, e.g. `start < end`.
 /// Nulls on either side skip the row; use nullable=false for strictness.
@@ -126,26 +140,30 @@ pub struct ColumnComparison {
 
 impl ColumnComparison {
     /// Exact integer-pair comparison in the widened `i128`/`u128` domain.
-    /// Temporal columns convert through `Int64` first. Nulls propagate as
-    /// null and are skipped by the caller, mirroring the float path.
+    /// Temporal columns convert through `Int64` first. Pairs of native
+    /// `Int8`–`Int64` columns (and identical-dtype temporals) compare
+    /// through `i64` directly: the values lose nothing in the conversion,
+    /// so results are identical while using the CPU's native width. Nulls
+    /// propagate as null and are skipped by the caller, mirroring the
+    /// float path.
     fn validate_int_pair(
         &self,
         left: &Series,
         right: &Series,
         unsigned: bool,
     ) -> Vec<ValidationError> {
-        fn to_int128(series: &Series) -> PolarsResult<Int128Chunked> {
-            match series.dtype() {
-                DataType::Date
-                | DataType::Datetime(_, _)
-                | DataType::Duration(_)
-                | DataType::Time => Ok(series
-                    .cast(&DataType::Int64)?
-                    .cast(&DataType::Int128)?
-                    .i128()?
-                    .clone()),
-                _ => Ok(series.cast(&DataType::Int128)?.i128()?.clone()),
-            }
+        /// Any signed int dtype within `i64`, or a temporal dtype (whose
+        /// ticks are `i64` by construction; mixed temporal units were
+        /// rejected by the caller already).
+        fn is_narrow(series: &Series) -> bool {
+            matches!(
+                series.dtype(),
+                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
+            ) || is_temporal_dtype(series.dtype())
+        }
+        /// Lossless widening of a narrow column to a shared `i64` domain.
+        fn narrow_int64(series: &Series) -> PolarsResult<Int64Chunked> {
+            Ok(series.cast(&DataType::Int64)?.i64()?.clone())
         }
         let mask: PolarsResult<BooleanChunked> = (|| {
             if unsigned {
@@ -159,9 +177,20 @@ impl ColumnComparison {
                     CompareOp::Eq => l.equal(&r),
                     CompareOp::Ne => l.not_equal(&r),
                 })
+            } else if is_narrow(left) && is_narrow(right) {
+                let l = narrow_int64(left)?;
+                let r = narrow_int64(right)?;
+                Ok(match self.op {
+                    CompareOp::Lt => l.lt(&r),
+                    CompareOp::Le => l.lt_eq(&r),
+                    CompareOp::Gt => l.gt(&r),
+                    CompareOp::Ge => l.gt_eq(&r),
+                    CompareOp::Eq => l.equal(&r),
+                    CompareOp::Ne => l.not_equal(&r),
+                })
             } else {
-                let l = to_int128(left)?;
-                let r = to_int128(right)?;
+                let l = left.cast(&DataType::Int128)?.i128()?.clone();
+                let r = right.cast(&DataType::Int128)?.i128()?.clone();
                 Ok(match self.op {
                     CompareOp::Lt => l.lt(&r),
                     CompareOp::Le => l.lt_eq(&r),
@@ -176,14 +205,7 @@ impl ColumnComparison {
             Ok(mask) => {
                 // Rows where the comparison does not hold fail; nulls stay
                 // unset and are skipped, mirroring the float path.
-                let failed: Vec<usize> = mask
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, value)| match value {
-                        Some(false) => Some(index),
-                        _ => None,
-                    })
-                    .collect();
+                let failed: Vec<usize> = get_false_indices(&mask);
                 comparison_result(self, failed)
             }
             Err(error) => vec![ValidationError::multi(
@@ -210,9 +232,9 @@ impl ColumnComparison {
         use std::cmp::Ordering;
         let extracted: PolarsResult<MixedPairValues> = (|| {
             if left_signed {
-                Ok((int128_cells(left)?, uint128_cells(right)?))
+                Ok((int128_ca(left)?, uint128_ca(right)?))
             } else {
-                Ok((int128_cells(right)?, uint128_cells(left)?))
+                Ok((int128_ca(right)?, uint128_ca(left)?))
             }
         })();
         match extracted {
@@ -223,7 +245,7 @@ impl ColumnComparison {
                     .enumerate()
                     .filter_map(|(index, pair)| match pair {
                         (Some(a), Some(b)) => {
-                            let order = cmp_mixed_int_uint(*a, *b);
+                            let order = cmp_mixed_int_uint(a, b);
                             // `order` is signed-vs-unsigned; flip it when the
                             // unsigned side is on the left.
                             let order = if left_signed { order } else { order.reverse() };
@@ -278,12 +300,13 @@ impl DataFrameCheck for ColumnComparison {
         }
     }
     fn validate(&self, df: &DataFrame) -> Vec<ValidationError> {
+        // Borrows only: no column materialization happens on this path.
         let left = match df.column(&self.left) {
-            Ok(c) => c.as_materialized_series().clone(),
+            Ok(c) => c.as_materialized_series(),
             Err(_) => return vec![missing_column_error(std::slice::from_ref(&self.left))],
         };
         let right = match df.column(&self.right) {
-            Ok(c) => c.as_materialized_series().clone(),
+            Ok(c) => c.as_materialized_series(),
             Err(_) => return vec![missing_column_error(std::slice::from_ref(&self.right))],
         };
 
@@ -335,26 +358,26 @@ impl DataFrameCheck for ColumnComparison {
         if int_domain(left.dtype()) == Some(IntDomain::I128)
             && int_domain(right.dtype()) == Some(IntDomain::I128)
         {
-            return self.validate_int_pair(&left, &right, false);
+            return self.validate_int_pair(left, right, false);
         }
         if int_domain(left.dtype()) == Some(IntDomain::U128)
             && int_domain(right.dtype()) == Some(IntDomain::U128)
         {
-            return self.validate_int_pair(&left, &right, true);
+            return self.validate_int_pair(left, right, true);
         }
         // Mixed signed/unsigned pairs share no lossless primitive domain;
         // compare exactly value by value instead of rounding through f64.
         if int_domain(left.dtype()) == Some(IntDomain::I128)
             && int_domain(right.dtype()) == Some(IntDomain::U128)
         {
-            return self.validate_mixed_pair(&left, &right, true);
+            return self.validate_mixed_pair(left, right, true);
         }
         if int_domain(left.dtype()) == Some(IntDomain::U128)
             && int_domain(right.dtype()) == Some(IntDomain::I128)
         {
-            return self.validate_mixed_pair(&left, &right, false);
+            return self.validate_mixed_pair(left, right, false);
         }
-        let (Ok(left_num), Ok(right_num)) = (numeric_series(&left), numeric_series(&right)) else {
+        let (Ok(left_num), Ok(right_num)) = (numeric_series(left), numeric_series(right)) else {
             return vec![ValidationError::multi(
                 vec![self.left.clone(), self.right.clone()],
                 self.name(),
@@ -365,26 +388,29 @@ impl DataFrameCheck for ColumnComparison {
                 ),
             )];
         };
-        let left_vals: Vec<Option<f64>> = left_num.iter().collect();
-        let right_vals: Vec<Option<f64>> = right_num.iter().collect();
-        let mut failed = Vec::new();
-        for (i, (l, r)) in left_vals.iter().zip(right_vals.iter()).enumerate() {
-            let (Some(l), Some(r)) = (l, r) else { continue };
-            let ok = match self.op {
-                CompareOp::Lt => l < r,
-                CompareOp::Le => l <= r,
-                CompareOp::Gt => l > r,
-                CompareOp::Ge => l >= r,
-                // Exact float equality is intentional: cross-column checks
-                // assert identical stored values, not approximate math.
-                CompareOp::Eq => l == r,
-                CompareOp::Ne => l != r,
-            };
-            if !ok {
-                failed.push(i);
-            }
-        }
-        comparison_result(self, failed)
+        // Vectorized comparison in Polars' native float domain; nulls on
+        // either side propagate to a null mask cell and are skipped by the
+        // index extraction. Polars' kernels use total equality/order (NaN
+        // == NaN), but the historical scalar semantics were Rust's `f64`
+        // ops (any NaN involvement fails N lt/le/gt/ge/eq comparisons and
+        // passes `ne`), so NaN rows are re-mapped afterwards to keep every
+        // prior verdict.
+        let nan_involved = (&left_num.is_nan()) | (&right_num.is_nan());
+        let compare_mask = match self.op {
+            CompareOp::Lt => left_num.lt(&right_num),
+            CompareOp::Le => left_num.lt_eq(&right_num),
+            CompareOp::Gt => left_num.gt(&right_num),
+            CompareOp::Ge => left_num.gt_eq(&right_num),
+            // Exact float equality is intentional: cross-column checks
+            // assert identical stored values, not approximate math.
+            CompareOp::Eq => left_num.equal(&right_num),
+            CompareOp::Ne => left_num.not_equal(&right_num),
+        };
+        let fail_mask = match self.op {
+            CompareOp::Ne => (&!compare_mask) & &!nan_involved,
+            _ => (&!compare_mask) | &nan_involved,
+        };
+        comparison_result(self, get_true_indices(&fail_mask))
     }
 }
 
@@ -418,12 +444,16 @@ pub struct Ordered {
     pub strict: bool,
 }
 
-/// The per-column value pool used by the chain comparison.
+/// The per-column value pool used by the chain comparison. Owned chunked
+/// arrays: widening (ints to `i128`, floats to `f64`) is a cheap column
+/// cast, so no per-row cell vector is materialized, and text pools borrow
+/// the original string data through the chunked instead of cloning every
+/// cell into a heap `String`.
 enum ChainVals {
-    Signed(Vec<Option<i128>>),
-    Unsigned(Vec<Option<u128>>),
-    Float(Vec<Option<f64>>),
-    Text(Vec<Option<String>>),
+    Signed(Int128Chunked),
+    Unsigned(UInt128Chunked),
+    Float(Float64Chunked),
+    Text(StringChunked),
 }
 
 /// Classified pool of one column, choosing the widest exact domain with
@@ -434,90 +464,54 @@ fn classify_chain_column(name: &str, series: &Series) -> PolarsResult<ChainVals>
         let text = series
             .str()
             .map_err(|_| PolarsError::ComputeError("expected a string column".into()))?;
-        return Ok(ChainVals::Text(
-            text.iter().map(|v| v.map(str::to_string)).collect(),
-        ));
+        return Ok(ChainVals::Text(text.clone()));
     }
     if int_domain(series.dtype()) == Some(IntDomain::I128) {
-        return Ok(ChainVals::Signed(int128_cells(series)?));
+        return Ok(ChainVals::Signed(int128_ca(series)?));
     }
     if int_domain(series.dtype()) == Some(IntDomain::U128) {
-        return Ok(ChainVals::Unsigned(uint128_cells(series)?));
+        return Ok(ChainVals::Unsigned(uint128_ca(series)?));
     }
     let floats = numeric_series(series).map_err(|_| {
         PolarsError::ComputeError(format!("Column '{name}' is not string or numeric").into())
     })?;
-    Ok(ChainVals::Float(floats.iter().collect()))
+    Ok(ChainVals::Float(floats))
 }
 
-/// Whether a strict or non-strict comparison holds for two present values.
-fn chain_pair_holds(
-    strict: bool,
-    left: &ChainVals,
-    right: &ChainVals,
-    row: usize,
-) -> Result<bool, ()> {
-    // `Err(())` reports an incomparable domain pair; the caller turns it
-    // into the general unsupported-columns error.
-    macro_rules! compare {
-        ($a:expr, $b:expr) => {{
-            match (&$a, &$b) {
-                (Some(a), Some(b)) => {
-                    if strict {
-                        a < b
-                    } else {
-                        a <= b
-                    }
-                }
-                _ => return Ok(true), // a null skips the pair
-            }
-        }};
+/// Row fails the pair when the chain relation does not hold: strict chains
+/// require `a < b` everywhere, non-strict `a <= b`. The negation form is
+/// deliberate: it keeps non-comparable values (NaN) failing exactly like
+/// the old cell loop.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn chain_pair_fails<T: PartialOrd>(strict: bool, a: T, b: T) -> bool {
+    if strict {
+        !(a < b)
+    } else {
+        !(a <= b)
     }
-    match (left, right) {
-        (ChainVals::Signed(l), ChainVals::Signed(r)) => Ok(compare!(l[row], r[row])),
-        (ChainVals::Unsigned(l), ChainVals::Unsigned(r)) => Ok(compare!(l[row], r[row])),
-        (ChainVals::Float(l), ChainVals::Float(r)) => Ok(compare!(l[row], r[row])),
-        (ChainVals::Text(l), ChainVals::Text(r)) => Ok(compare!(l[row], r[row])),
-        (ChainVals::Signed(l), ChainVals::Unsigned(r)) => Ok(compare_mixed_pair(
-            strict,
-            l[row].as_ref(),
-            r[row].as_ref(),
-            false,
-        )),
-        (ChainVals::Unsigned(l), ChainVals::Signed(r)) => Ok(compare_mixed_pair(
-            strict,
-            r[row].as_ref(),
-            l[row].as_ref(),
-            true,
-        )),
-        (ChainVals::Float(l), ChainVals::Signed(r)) => {
-            Ok(compare!(l[row], r[row].map(|v| v as f64)))
-        }
-        (ChainVals::Signed(l), ChainVals::Float(r)) => {
-            Ok(compare!(l[row].map(|v| v as f64), r[row]))
-        }
-        (ChainVals::Float(l), ChainVals::Unsigned(r)) => {
-            Ok(compare!(l[row], r[row].map(|v| v as f64)))
-        }
-        (ChainVals::Unsigned(l), ChainVals::Float(r)) => {
-            Ok(compare!(l[row].map(|v| v as f64), r[row]))
-        }
-        _ => Err(()),
-    }
+}
+
+/// Builds a Boolean mask over paired present values; `None` on either side
+/// (null or unmatched length) skips the row.
+fn pair_mask<T, U, F, I, J>(left: I, right: J, holds: F) -> BooleanChunked
+where
+    I: IntoIterator<Item = Option<T>>,
+    J: IntoIterator<Item = Option<U>>,
+    F: Fn(T, U) -> bool,
+{
+    IntoIterator::into_iter(left)
+        .zip(IntoIterator::into_iter(right))
+        .map(|(a, b)| match (a, b) {
+            (Some(a), Some(b)) => Some(holds(a, b)),
+            _ => None,
+        })
+        .collect::<BooleanChunked>()
 }
 
 /// Exact total-order comparison between signed and unsigned cell values.
-fn compare_mixed_pair(
-    strict: bool,
-    signed: Option<&i128>,
-    unsigned: Option<&u128>,
-    unsigned_on_left: bool,
-) -> bool {
-    let (Some(signed), Some(unsigned)) = (signed, unsigned) else {
-        return true; // a null skips the pair
-    };
+fn mixed_pair_holds(strict: bool, signed: i128, unsigned: u128, unsigned_on_left: bool) -> bool {
     use std::cmp::Ordering;
-    let order = cmp_mixed_int_uint(*signed, *unsigned);
+    let order = cmp_mixed_int_uint(signed, unsigned);
     let order = if unsigned_on_left {
         order.reverse()
     } else {
@@ -527,6 +521,46 @@ fn compare_mixed_pair(
         order == Ordering::Less
     } else {
         order != Ordering::Greater
+    }
+}
+
+/// Failing mask of one adjacent pair in the ordered chain. `Err` marks an
+/// unsupported domain pair (the caller already rejects text/numeric
+/// mixing, so this is defensive).
+fn pair_fail_mask(strict: bool, left: &ChainVals, right: &ChainVals) -> Result<BooleanChunked, ()> {
+    use ChainVals::*;
+    match (left, right) {
+        (Signed(l), Signed(r)) => Ok(pair_mask(l.iter(), r.iter(), |a, b| {
+            chain_pair_fails(strict, a, b)
+        })),
+        (Unsigned(l), Unsigned(r)) => Ok(pair_mask(l.iter(), r.iter(), |a, b| {
+            chain_pair_fails(strict, a, b)
+        })),
+        (Float(l), Float(r)) => Ok(pair_mask(l.iter(), r.iter(), |a, b| {
+            chain_pair_fails(strict, a, b)
+        })),
+        (Text(l), Text(r)) => Ok(pair_mask(l.iter(), r.iter(), |a, b| {
+            chain_pair_fails(strict, a, b)
+        })),
+        (Signed(l), Unsigned(r)) => Ok(pair_mask(l.iter(), r.iter(), |a, b| {
+            !mixed_pair_holds(strict, a, b, false)
+        })),
+        (Unsigned(l), Signed(r)) => Ok(pair_mask(l.iter(), r.iter(), |a, b| {
+            !mixed_pair_holds(strict, b, a, true)
+        })),
+        (Float(l), Signed(r)) => Ok(pair_mask(l.iter(), r.iter(), |a, b| {
+            chain_pair_fails(strict, a, b as f64)
+        })),
+        (Signed(l), Float(r)) => Ok(pair_mask(l.iter(), r.iter(), |a, b| {
+            chain_pair_fails(strict, a as f64, b)
+        })),
+        (Float(l), Unsigned(r)) => Ok(pair_mask(l.iter(), r.iter(), |a, b| {
+            chain_pair_fails(strict, a, b as f64)
+        })),
+        (Unsigned(l), Float(r)) => Ok(pair_mask(l.iter(), r.iter(), |a, b| {
+            chain_pair_fails(strict, a as f64, b)
+        })),
+        _ => Err(()),
     }
 }
 
@@ -612,16 +646,36 @@ impl DataFrameCheck for Ordered {
             .map(|name| name.as_str())
             .collect::<Vec<_>>()
             .join(if self.strict { " < " } else { " <= " });
-        let height = df.height();
-        let mut failed = Vec::new();
-        for row in 0..height {
-            let ordered = pools.windows(2).all(|pair| {
-                chain_pair_holds(self.strict, &pair[0], &pair[1], row).unwrap_or(false)
+        // One failing mask per adjacent pair, merged while walking the
+        // chain: a row fails when any adjacent pair is violated. This
+        // replaces the per-row window loop with per-pair passes over the
+        // data (better locality, no per-cell materialization).
+        let mut failed_mask: Option<BooleanChunked> = None;
+        for pair in pools.windows(2) {
+            let partial = match pair_fail_mask(self.strict, &pair[0], &pair[1]) {
+                Ok(mask) => mask,
+                Err(()) => {
+                    return vec![ValidationError::multi(
+                        self.columns.clone(),
+                        self.name(),
+                        vec![],
+                        format!(
+                            "Cannot order {}: unsupported column types",
+                            self.columns.join(", ")
+                        ),
+                    )]
+                }
+            };
+            failed_mask = Some(match failed_mask {
+                None => partial,
+                Some(merged) => &merged | &partial,
             });
-            if !ordered {
-                failed.push(row);
-            }
         }
+        let Some(failed_mask) = failed_mask else {
+            // A single-column chain has no pair to violate.
+            return Vec::new();
+        };
+        let failed = get_true_indices(&failed_mask);
         if failed.is_empty() {
             Vec::new()
         } else {
@@ -677,7 +731,7 @@ impl DataFrameCheck for SumColumns {
                 )];
             }
             let pool = if int_domain(series.dtype()) == Some(IntDomain::I128) {
-                match int128_cells(series) {
+                match int128_ca(series) {
                     Ok(values) => ChainVals::Signed(values),
                     Err(error) => {
                         return vec![ValidationError::multi(
@@ -689,7 +743,7 @@ impl DataFrameCheck for SumColumns {
                     }
                 }
             } else if int_domain(series.dtype()) == Some(IntDomain::U128) {
-                match uint128_cells(series) {
+                match uint128_ca(series) {
                     Ok(values) => ChainVals::Unsigned(values),
                     Err(error) => {
                         return vec![ValidationError::multi(
@@ -702,7 +756,7 @@ impl DataFrameCheck for SumColumns {
                 }
             } else {
                 match numeric_series(series) {
-                    Ok(values) => ChainVals::Float(values.iter().collect()),
+                    Ok(values) => ChainVals::Float(values),
                     Err(_) => {
                         return vec![ValidationError::multi(
                             columns.clone(),
@@ -718,10 +772,13 @@ impl DataFrameCheck for SumColumns {
         let target_idx = pools.len() - 1;
         let addend_count = self.addends.len();
         let tolerance = self.tolerance.unwrap_or(0.0);
+        // The widest applicable sum domain depends only on the columns,
+        // not on the row: resolve it once instead of per row.
+        let sum_kind = sum_kind(&pools[..addend_count]);
         let height = df.height();
         let mut failed = Vec::new();
         for row in 0..height {
-            let sum = match sum_cells(&pools[..addend_count], row) {
+            let sum = match sum_cells(&pools[..addend_count], sum_kind, row) {
                 SumStatus::Skip => continue,
                 SumStatus::Overflow => {
                     failed.push(row);
@@ -774,30 +831,29 @@ enum SumStatus {
     Value(SumResult),
 }
 
-/// Sums the operands of one row when they are all present, keeping
-/// integers exact with `i128`/`u128` checked arithmetic and defaulting to
-/// `f64` whenever a float column participates (or the two integer domains
-/// mix, mirroring the `ColumnComparison` fallback).
-fn sum_cells(pools: &[ChainVals], row: usize) -> SumStatus {
+/// The widest applicable sum domain, resolved once per check instead of
+/// once per row.
+enum SumKind {
+    UnsignedOnly,
+    FloatDowngrade,
+    SignedOnly,
+}
+
+impl Copy for SumKind {}
+
+impl Clone for SumKind {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+fn sum_kind(pools: &[ChainVals]) -> SumKind {
     let all_unsigned = !pools.is_empty()
         && pools
             .iter()
             .all(|pool| matches!(pool, ChainVals::Unsigned(_)));
     if all_unsigned {
-        let mut total: u128 = 0;
-        for pool in pools {
-            let ChainVals::Unsigned(cell) = pool else {
-                unreachable!("all_unsigned checked above");
-            };
-            let Some(value) = cell[row] else {
-                return SumStatus::Skip;
-            };
-            let Some(next) = total.checked_add(value) else {
-                return SumStatus::Overflow;
-            };
-            total = next;
-        }
-        return SumStatus::Value(SumResult::Unsigned(total));
+        return SumKind::UnsignedOnly;
     }
     let any_float = pools.iter().any(|pool| matches!(pool, ChainVals::Float(_)));
     let mixed_int = pools
@@ -807,43 +863,75 @@ fn sum_cells(pools: &[ChainVals], row: usize) -> SumStatus {
             .iter()
             .any(|pool| matches!(pool, ChainVals::Signed(_)));
     if any_float || mixed_int {
-        let mut total = 0.0f64;
-        for pool in pools {
-            let cell = match pool {
-                ChainVals::Float(cell) => cell[row],
-                ChainVals::Signed(cell) => cell[row].map(|v| v as f64),
-                ChainVals::Unsigned(cell) => cell[row].map(|v| v as f64),
-                ChainVals::Text(_) => return SumStatus::Overflow,
-            };
-            let Some(cell) = cell else {
-                return SumStatus::Skip;
-            };
-            total += cell;
+        SumKind::FloatDowngrade
+    } else {
+        SumKind::SignedOnly
+    }
+}
+
+/// Sums the operands of one row when they are all present, keeping
+/// integers exact with `i128`/`u128` checked arithmetic and defaulting to
+/// `f64` whenever a float column participates (or the two integer domains
+/// mix, mirroring the `ColumnComparison` fallback).
+fn sum_cells(pools: &[ChainVals], kind: SumKind, row: usize) -> SumStatus {
+    match kind {
+        SumKind::UnsignedOnly => {
+            let mut total: u128 = 0;
+            for pool in pools {
+                let ChainVals::Unsigned(cell) = pool else {
+                    unreachable!("sum_kind checked above");
+                };
+                let Some(value) = cell.get(row) else {
+                    return SumStatus::Skip;
+                };
+                let Some(next) = total.checked_add(value) else {
+                    return SumStatus::Overflow;
+                };
+                total = next;
+            }
+            SumStatus::Value(SumResult::Unsigned(total))
         }
-        return SumStatus::Value(SumResult::Float(total));
+        SumKind::FloatDowngrade => {
+            let mut total = 0.0f64;
+            for pool in pools {
+                let cell = match pool {
+                    ChainVals::Float(cell) => cell.get(row),
+                    ChainVals::Signed(cell) => cell.get(row).map(|v| v as f64),
+                    ChainVals::Unsigned(cell) => cell.get(row).map(|v| v as f64),
+                    ChainVals::Text(_) => return SumStatus::Overflow,
+                };
+                let Some(cell) = cell else {
+                    return SumStatus::Skip;
+                };
+                total += cell;
+            }
+            SumStatus::Value(SumResult::Float(total))
+        }
+        SumKind::SignedOnly => {
+            let mut total: i128 = 0;
+            for pool in pools {
+                let ChainVals::Signed(cell) = pool else {
+                    unreachable!("all remaining pools are signed");
+                };
+                let Some(value) = cell.get(row) else {
+                    return SumStatus::Skip;
+                };
+                let Some(next) = total.checked_add(value) else {
+                    return SumStatus::Overflow;
+                };
+                total = next;
+            }
+            SumStatus::Value(SumResult::Signed(total))
+        }
     }
-    let mut total: i128 = 0;
-    for pool in pools {
-        let ChainVals::Signed(cell) = pool else {
-            unreachable!("all remaining pools are signed");
-        };
-        let Some(value) = cell[row] else {
-            return SumStatus::Skip;
-        };
-        let Some(next) = total.checked_add(value) else {
-            return SumStatus::Overflow;
-        };
-        total = next;
-    }
-    SumStatus::Value(SumResult::Signed(total))
 }
 
 /// The target value of one row in its own domain.
 fn target_cell(pool: &ChainVals, row: usize) -> Option<SumResult> {
     match pool {
-        ChainVals::Signed(cell) => cell[row].map(SumResult::Signed),
-        ChainVals::Unsigned(cell) => cell[row].map(SumResult::Unsigned),
-        ChainVals::Float(cell) => cell[row].map(SumResult::Float),
+        ChainVals::Signed(cell) => cell.get(row).map(SumResult::Signed),
+        ChainVals::Unsigned(cell) => cell.get(row).map(SumResult::Unsigned),
+        ChainVals::Float(cell) => cell.get(row).map(SumResult::Float),
         ChainVals::Text(_) => None,
     }
 }
@@ -903,17 +991,11 @@ impl DataFrameCheck for Implies {
             Ok(c) => c.as_materialized_series(),
             Err(_) => return vec![missing_column_error(std::slice::from_ref(&self.by))],
         };
-        let left_null = left.is_null();
-        let by_null = by.is_null();
-        let failed: Vec<usize> = left_null
-            .iter()
-            .zip(by_null.iter())
-            .enumerate()
-            .filter_map(|(i, (l, b))| match (l, b) {
-                (Some(false), Some(true)) => Some(i),
-                _ => None,
-            })
-            .collect();
+        // A null `left` skips the row; a null `by` under a present `left`
+        // fails. `is_null` masks carry no validity bitmap themselves, so
+        // the AND composes null-free.
+        let failed_mask = left.is_not_null() & by.is_null();
+        let failed: Vec<usize> = get_true_indices(&failed_mask);
         if failed.is_empty() {
             Vec::new()
         } else {
@@ -962,38 +1044,13 @@ impl DataFrameCheck for Determines {
             Ok(c) => c.as_materialized_series(),
             Err(_) => return vec![missing_column_error(std::slice::from_ref(&self.b))],
         };
-        let mut first_b: HashMap<String, (String, usize)> = HashMap::new();
-        let mut first_row_reported: HashSet<usize> = HashSet::new();
-        let mut failed: Vec<usize> = Vec::new();
-        for row in 0..df.height() {
-            let a_cell = match a.get(row).ok() {
-                Some(value) if !matches!(value, AnyValue::Null) => format!("{value:?}"),
-                _ => continue, // a null (or unreadable) `a` does not participate
-            };
-            let b_cell = match b.get(row).ok() {
-                Some(value) if !matches!(value, AnyValue::Null) => format!("{value:?}"),
-                _ => continue, // a null `b` does not participate
-            };
-            match first_b.entry(a_cell) {
-                std::collections::hash_map::Entry::Occupied(entry) => {
-                    let (seen, first_row) = entry.get();
-                    if *seen != b_cell {
-                        failed.push(row);
-                        if first_row_reported.insert(*first_row) {
-                            failed.push(*first_row);
-                        }
-                    }
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert((b_cell, row));
-                }
-            }
-        }
+        // Only rows where both cells participate (neither is null) take
+        // part in the functional dependency, so sorting starts from the
+        // participating subset with its original row numbers attached.
+        let failed = determines_rows(a, b);
         if failed.is_empty() {
             Vec::new()
         } else {
-            failed.sort_unstable();
-            failed.dedup();
             vec![ValidationError::multi(
                 vec![self.a.clone(), self.b.clone()],
                 self.name(),
@@ -1005,6 +1062,158 @@ impl DataFrameCheck for Determines {
             )]
         }
     }
+}
+
+/// Conflicting rows for `b = f(a)`: scalar fallback. Compares the `Debug`
+/// representations of the cells, which works for every dtype, and mirrors
+/// the historical implementation (a null on either side skips the row; the
+/// first occurrence of each `a` value binds its `b`; deviants and their
+/// binding row are reported).
+fn determines_rows_scalar(a: &Series, b: &Series) -> Vec<usize> {
+    let mut first_b: HashMap<String, (String, usize)> = HashMap::new();
+    let mut first_row_reported: HashSet<usize> = HashSet::new();
+    let mut failed: Vec<usize> = Vec::new();
+    for row in 0..a.len() {
+        let a_cell = match a.get(row).ok() {
+            Some(value) if !matches!(value, AnyValue::Null) => format!("{value:?}"),
+            _ => continue, // a null (or unreadable) `a` does not participate
+        };
+        let b_cell = match b.get(row).ok() {
+            Some(value) if !matches!(value, AnyValue::Null) => format!("{value:?}"),
+            _ => continue, // a null `b` does not participate
+        };
+        match first_b.entry(a_cell) {
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                let (seen, first_row) = entry.get();
+                if *seen != b_cell {
+                    failed.push(row);
+                    if first_row_reported.insert(*first_row) {
+                        failed.push(*first_row);
+                    }
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert((b_cell, row));
+            }
+        }
+    }
+    failed.sort_unstable();
+    failed.dedup();
+    failed
+}
+
+/// Vectorized conflict detection without the lazy engine. Participants
+/// are filtered eagerly, then stably sorted by `a` alone (participants
+/// start row-ascending, so that equals sorting by `(a, row)`); the
+/// per-group reference index is filled forward in a small boolean scan and
+/// the actual value comparisons run through Polars's chunked kernels.
+fn determines_rows_vectorized(a: &Series, b: &Series) -> PolarsResult<Vec<usize>> {
+    let height = a.len();
+    let mask = (&a.is_not_null()) & (&b.is_not_null());
+    let rows_full = Series::new(
+        PlSmallStr::from_static("__row"),
+        (0..height as i64).collect::<Vec<i64>>(),
+    );
+    let a_f = a.filter(&mask)?;
+    let b_f = b.filter(&mask)?;
+    let rows_f = rows_full.filter(&mask)?;
+
+    let n_sorted = a_f.len();
+    if n_sorted == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Stable ascending sort keeps the participants of one `a` group in
+    // ascending row order, so the first member is the binding row.
+    // Single threaded because the check already runs inside the parallel
+    // validation loop.
+    let order = a_f.arg_sort(SortOptions {
+        descending: false,
+        nulls_last: false,
+        multithreaded: false,
+        maintain_order: true,
+        limit: None,
+    });
+    let a_s = a_f.take(&order)?;
+    let b_s = b_f.take(&order)?;
+    let rows_s = rows_f.take(&order)?;
+    let row_ids = rows_s.i64()?;
+
+    // Group boundaries: row i (for i >= 1) belongs to the previous row's
+    // group iff its `a` equals the previous `a`. Null cells cannot appear
+    // because only participating rows are kept.
+    let same_prev = a_s
+        .slice(1, n_sorted - 1)
+        .equal(&a_s.slice(0, n_sorted - 1))?;
+
+    // Pass 1: fill forward the per-group reference index.
+    let mut ref_idx: Vec<u32> = Vec::with_capacity(n_sorted);
+    let mut current: u32 = 0;
+    let mut same_values = same_prev
+        .downcast_iter()
+        .flat_map(|chunk| chunk.values_iter());
+    for position in 0..n_sorted {
+        let same: bool = if position == 0 {
+            false
+        } else {
+            same_values.next().unwrap_or(false)
+        };
+        if !same {
+            current = position as u32;
+        }
+        ref_idx.push(current);
+    }
+
+    // The reference `b` of each position's group, brought in by gather so
+    // the comparison itself stays a chunked kernel call.
+    let ref_idx_ca = IdxCa::from_vec(PlSmallStr::from_static("__ref"), ref_idx);
+    let ref_b = b_s.take(&ref_idx_ca)?;
+    let deviant = b_s.not_equal(&ref_b)?;
+
+    // Pass 2: deviant rows and their binding row become the failed set.
+    let mut failed: Vec<usize> = Vec::new();
+    let mut same_values = same_prev
+        .downcast_iter()
+        .flat_map(|chunk| chunk.values_iter());
+    let mut deviant_values = deviant
+        .downcast_iter()
+        .flat_map(|chunk| chunk.values_iter());
+    for position in 0..n_sorted {
+        let same: bool = if position == 0 {
+            false
+        } else {
+            same_values.next().unwrap_or(false)
+        };
+        let deviant = deviant_values.next().unwrap_or(false);
+        if same && deviant {
+            let deviant_row = row_ids.get(position).unwrap_or(0);
+            failed.push(deviant_row as usize);
+            let binding = ref_idx_ca.get(position).unwrap_or(0) as usize;
+            let binding_row = row_ids.get(binding).unwrap_or(0);
+            failed.push(binding_row as usize);
+        }
+    }
+    failed.sort_unstable();
+    failed.dedup();
+    Ok(failed)
+}
+
+/// Conflicting rows for `b = f(a)`; nested and binary dtypes (and any
+/// engine failure) fall back to the scalar path, which supports every
+/// dtype.
+fn determines_rows(a: &Series, b: &Series) -> Vec<usize> {
+    fn comparable(series: &Series) -> bool {
+        !matches!(
+            series.dtype(),
+            DataType::List(_) | DataType::Array(_, _) | DataType::Struct(_) | DataType::Binary
+        )
+    }
+    if comparable(a) && comparable(b) {
+        if let Ok(rows) = determines_rows_vectorized(a, b) {
+            return rows;
+        }
+    }
+    determines_rows_scalar(a, b)
 }
 
 /// Checks that `right - left` at most `max_gap_ns`. Both columns must be
@@ -1079,7 +1288,7 @@ impl DataFrameCheck for Within {
             )];
         }
         let scale = ns_per_tick(left.dtype());
-        let left_ticks = match int128_cells(left) {
+        let left_ticks = match int128_ca(left) {
             Ok(values) => values,
             Err(error) => {
                 return vec![ValidationError::multi(
@@ -1090,7 +1299,7 @@ impl DataFrameCheck for Within {
                 )]
             }
         };
-        let right_ticks = match int128_cells(right) {
+        let right_ticks = match int128_ca(right) {
             Ok(values) => values,
             Err(error) => {
                 return vec![ValidationError::multi(
@@ -1101,20 +1310,21 @@ impl DataFrameCheck for Within {
                 )]
             }
         };
-        let gap = i128::from(self.max_gap_ns);
+        // The bound is divided once instead of every row scaling its own
+        // difference. Failing iff `difference * scale > gap_ns` is exactly
+        // failing iff `difference > gap_ns.div_euclid(scale)` (floor
+        // division), given tick differences are integers — so the
+        // per-row multiplication (and the old overflow silent-row-skip)
+        // disappear without changing any verdict.
+        let cap = i128::from(self.max_gap_ns).div_euclid(scale);
         let failed: Vec<usize> = left_ticks
             .iter()
             .zip(right_ticks.iter())
             .enumerate()
             .filter_map(|(row, (l, r))| match (l, r) {
-                (Some(l), Some(r)) => {
-                    let difference = (r - l).checked_mul(scale)?;
-                    if difference > gap {
-                        Some(row)
-                    } else {
-                        None
-                    }
-                }
+                // Both cells are widened from temporal `i64`/`i32` ticks,
+                // so the subtraction cannot overflow `i128`.
+                (Some(l), Some(r)) if r - l > cap => Some(row),
                 _ => None,
             })
             .collect();

@@ -315,13 +315,18 @@ class ValidationReport:
     def summary(self) -> str:
         """Render a human-readable multi-line summary of every error."""
 
-    def to_dataframe(self) -> Any:
+    def to_dataframe(self, max_rows: int | None = None) -> Any:
         """Expand failures into a Polars ``DataFrame``.
+
+        Args:
+            max_rows: Optional cap on the number of failing rows expanded
+                per error. ``None`` (the default) keeps every row.
 
         Returns:
             A frame with columns ``column``, ``columns``, ``check``,
             ``row``, and ``message``. Schema-level errors have a null
-            ``row``.
+            ``row``. When ``max_rows`` is set, each error keeps its first
+            failing rows up to the cap.
         """
 
     def raise_if_invalid(self) -> None:
