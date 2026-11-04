@@ -2629,9 +2629,7 @@ mod tests {
         use crate::checks::OneOfNumericValues;
         let schema = Schema::new(vec![int_spec(
             "level",
-            vec![Box::new(OneOfNumericValues {
-                allowed_values: vec![3.0, 5.0],
-            })],
+            vec![Box::new(OneOfNumericValues::new(vec![3.0, 5.0]))],
         )]);
         let frame = sample(&schema, 30, 8).unwrap();
         assert!(schema.validate(&frame).is_valid());
@@ -2649,9 +2647,7 @@ mod tests {
             name: "small".to_string(),
             dtype: DataType::Int8,
             nullable: false,
-            checks: vec![Box::new(OneOfNumericValues {
-                allowed_values: vec![3.0, 500.0],
-            })],
+            checks: vec![Box::new(OneOfNumericValues::new(vec![3.0, 500.0]))],
         }]);
         let frame = sample(&schema, 20, 4).unwrap();
         assert!(schema.validate(&frame).is_valid());
@@ -2670,9 +2666,7 @@ mod tests {
         use crate::checks::OneOfNumericValues;
         let schema = Schema::new(vec![int_spec(
             "value",
-            vec![Box::new(OneOfNumericValues {
-                allowed_values: vec![0.5],
-            })],
+            vec![Box::new(OneOfNumericValues::new(vec![0.5]))],
         )]);
         assert!(sample(&schema, 5, 6).is_err());
     }
@@ -2684,9 +2678,7 @@ mod tests {
             name: "flag".to_string(),
             dtype: DataType::Boolean,
             nullable: false,
-            checks: vec![Box::new(OneOfNumericValues {
-                allowed_values: vec![1.0],
-            })],
+            checks: vec![Box::new(OneOfNumericValues::new(vec![1.0]))],
         }]);
         let frame = sample(&schema, 10, 1).unwrap();
         assert!(schema.validate(&frame).is_valid());
@@ -2707,9 +2699,7 @@ mod tests {
             name: "day".to_string(),
             dtype: DataType::Date,
             nullable: false,
-            checks: vec![Box::new(OneOfNumericValues {
-                allowed_values: vec![3.0, 5.0],
-            })],
+            checks: vec![Box::new(OneOfNumericValues::new(vec![3.0, 5.0]))],
         }]);
         assert!(sample(&schema, 5, 2).is_err());
     }

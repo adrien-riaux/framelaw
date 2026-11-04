@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use polars::prelude::{BooleanChunked, DataFrame, NamedFrom, Series};
 use pyo3::prelude::*;
@@ -17,7 +17,7 @@ use framelaw_core::dataframe_checks::{
     ColumnComparison, CompareOp, DataFrameCheck, DataFrameCheckSpec, Determines, Implies, Ordered,
     SumColumns, UniqueTogether, Within,
 };
-use framelaw_core::errors::ValidationError;
+use framelaw_core::errors::{format_summary, ValidationError};
 use framelaw_core::inference::infer_schema as infer_core_schema;
 use framelaw_core::schema::Schema;
 
@@ -96,7 +96,7 @@ impl PyCheck {
             CheckType::OneOfString(v) => Box::new(OneOfString {
                 allowed_values: v.into_iter().collect(),
             }),
-            CheckType::OneOfNumeric(v) => Box::new(OneOfNumericValues { allowed_values: v }),
+            CheckType::OneOfNumeric(v) => Box::new(OneOfNumericValues::new(v)),
             CheckType::StrLengthBetween(min, max) => Box::new(StrLengthBetween {
                 min_len: min,
                 max_len: max,
@@ -831,11 +831,24 @@ impl PyColumn {
     }
 }
 
+/// The core resolution of a `PySchema`: the native Rust schema and the
+/// custom checks split out of the Python-facing check list. Built once and
+/// cached, because rebuilding re-extracts every dtype through PyO3,
+/// recompiles every regex, and re-allocates every check box on each
+/// validation call.
+struct PyResolution {
+    schema: Schema,
+    custom_checks: Vec<CustomCheck>,
+}
+
 #[pyclass(module = "framelaw", name = "Schema")]
 pub struct PySchema {
     columns: Vec<(String, PyColumn)>,
     table_checks: Vec<PyDataFrameCheck>,
     lazy: bool,
+    /// Cached `PyResolution`, invalidated whenever a column's checks change
+    /// (`PyColumnRef::add_check` is the only mutation point).
+    resolution: Mutex<Option<PyResolution>>,
 }
 
 const JSON_SCHEMA_VERSION: u32 = 2;
@@ -972,9 +985,10 @@ pub struct PyValidationError {
 pub struct PyValidationReport {
     #[pyo3(get)]
     errors: Vec<PyValidationError>,
-    /// Native errors kept for summary formatting so Python and Rust never
-    /// duplicate the presentation logic.
-    raw: Vec<ValidationError>,
+    /// Formatted summary, produced once when the report leaves the core.
+    /// Storing the final text (instead of a copy of the raw errors) keeps a
+    /// report with millions of failing rows at a fixed memory cost.
+    summary: String,
 }
 
 pyo3::create_exception!(
@@ -994,15 +1008,16 @@ impl PyValidationReport {
         if self.errors.is_empty() {
             Ok(())
         } else {
-            Err(PySchemaError::new_err(report_summary_text(&self.raw)))
+            Err(PySchemaError::new_err(self.summary.clone()))
         }
     }
 
     fn summary(&self) -> String {
-        report_summary_text(&self.raw)
+        self.summary.clone()
     }
 
-    fn to_dataframe(&self) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (max_rows = None))]
+    fn to_dataframe(&self, max_rows: Option<usize>) -> PyResult<PyDataFrame> {
         let mut columns = Vec::new();
         let mut all_columns = Vec::new();
         let mut checks = Vec::new();
@@ -1020,7 +1035,11 @@ impl PyValidationReport {
                 continue;
             }
 
-            for row in &error.rows {
+            let detail_rows: &[usize] = match max_rows {
+                Some(cap) => &error.rows[..cap.min(error.rows.len())],
+                None => &error.rows[..],
+            };
+            for row in detail_rows {
                 columns.push(error.column.clone());
                 all_columns.push(joined.clone());
                 checks.push(error.check.clone());
@@ -1047,17 +1066,15 @@ impl PyValidationReport {
 }
 
 /// Formats a failure report using the single formatter in the core crate,
-/// so Python and Rust summaries stay identical.
+/// so Python and Rust summaries stay identical. Passes the errors by
+/// reference: no native report copy is made just for formatting.
 fn report_summary_text(errors: &[ValidationError]) -> String {
-    let report = framelaw_core::errors::ValidationReport {
-        errors: errors.to_vec(),
-    };
-    report.summary()
+    format_summary(errors)
 }
 
 impl From<framelaw_core::errors::ValidationReport> for PyValidationReport {
     fn from(report: framelaw_core::errors::ValidationReport) -> Self {
-        let raw: Vec<ValidationError> = report.errors.clone();
+        let summary = report_summary_text(&report.errors);
         Self {
             errors: report
                 .errors
@@ -1073,7 +1090,7 @@ impl From<framelaw_core::errors::ValidationReport> for PyValidationReport {
                     }
                 })
                 .collect(),
-            raw,
+            summary,
         }
     }
 }
@@ -1232,6 +1249,7 @@ impl PySchema {
             columns,
             table_checks: Vec::new(),
             lazy: false,
+            resolution: Mutex::new(None),
         })
     }
 
@@ -1762,6 +1780,7 @@ impl PySchema {
             columns,
             table_checks: Vec::new(),
             lazy: false,
+            resolution: Mutex::new(None),
         })
     }
 
@@ -1802,6 +1821,7 @@ impl PySchema {
             columns,
             table_checks,
             lazy: false,
+            resolution: Mutex::new(None),
         })
     }
 
@@ -1843,10 +1863,14 @@ impl PySchema {
             columns,
             table_checks,
             lazy: document.lazy,
+            resolution: Mutex::new(None),
         })
     }
 
-    fn core_schema(&self, py: Python<'_>) -> PyResult<(Schema, Vec<CustomCheck>)> {
+    /// Converts the Python-facing check lists into the native core schema,
+    /// splitting out custom checks. Called only through the cached
+    /// `resolution`, never per validation call.
+    fn build_core_schema(&self, py: Python<'_>) -> PyResult<PyResolution> {
         let mut specs = Vec::new();
         for (name, col) in &self.columns {
             let checks: Vec<Box<dyn Check>> = col
@@ -1875,10 +1899,25 @@ impl PySchema {
             }
         }
 
-        Ok((
-            Schema::with_table_checks(specs, table_checks),
+        Ok(PyResolution {
+            schema: Schema::with_table_checks(specs, table_checks),
             custom_checks,
-        ))
+        })
+    }
+
+    /// Returns the cached resolution, building it on first use. The lock
+    /// guard must stay alive while the resolved `Schema` is used, but the
+    /// heavy validation work happens through `py.detach`, which does not
+    /// re-enter the interpreter.
+    fn resolution(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<std::sync::MutexGuard<'_, Option<PyResolution>>> {
+        let mut cached = self.resolution.lock().expect("resolution mutex poisoned");
+        if cached.is_none() {
+            *cached = Some(self.build_core_schema(py)?);
+        }
+        Ok(cached)
     }
 }
 
@@ -1922,6 +1961,7 @@ impl PySchema {
             columns: cols,
             table_checks: dataframe_checks.unwrap_or_default(),
             lazy,
+            resolution: Mutex::new(None),
         })
     }
 
@@ -1966,9 +2006,6 @@ impl PySchema {
 
     #[staticmethod]
     fn from_json(py: Python<'_>, json: &str) -> PyResult<Self> {
-        jiter::JsonValue::parse(json.as_bytes(), false).map_err(|error| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid schema JSON: {error}"))
-        })?;
         let document: JsonSchema = serde_json::from_str(json).map_err(|error| {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid schema JSON: {error}"))
         })?;
@@ -2015,10 +2052,13 @@ impl PySchema {
         raise_on_error: Option<bool>,
         chunk_rows: Option<u64>,
     ) -> PyResult<Option<PyValidationReport>> {
-        let (rust_schema, custom_checks) = self.core_schema(py)?;
+        let resolution = self.resolution(py)?;
+        let resolved = resolution.as_ref().expect("resolution() fills the cache");
+        let rust_schema = &resolved.schema;
+        let custom_checks = &resolved.custom_checks;
 
         if let Some(chunk_rows) = chunk_rows {
-            return validate_chunked(py, df, &rust_schema, &custom_checks, chunk_rows);
+            return validate_chunked(py, df, rust_schema, custom_checks, chunk_rows);
         }
 
         let raise = raise_on_error.unwrap_or(!self.lazy);
@@ -2026,7 +2066,7 @@ impl PySchema {
         let mut report = py.detach(|| rust_schema.validate(&polars_df));
         report
             .errors
-            .extend(run_custom_checks(py, &polars_df, &custom_checks)?);
+            .extend(run_custom_checks(py, &polars_df, custom_checks)?);
 
         if report.is_valid() {
             Ok(None)
@@ -2045,15 +2085,18 @@ impl PySchema {
         df: &Bound<'_, PyAny>,
         chunk_rows: Option<u64>,
     ) -> PyResult<Option<PyValidationReport>> {
-        let (rust_schema, custom_checks) = self.core_schema(py)?;
+        let resolution = self.resolution(py)?;
+        let resolved = resolution.as_ref().expect("resolution() fills the cache");
+        let rust_schema = &resolved.schema;
+        let custom_checks = &resolved.custom_checks;
         if let Some(chunk_rows) = chunk_rows {
-            return validate_chunked(py, df, &rust_schema, &custom_checks, chunk_rows);
+            return validate_chunked(py, df, rust_schema, custom_checks, chunk_rows);
         }
         let polars_df = materialize_frame(df)?;
         let mut report = py.detach(|| rust_schema.validate(&polars_df));
         report
             .errors
-            .extend(run_custom_checks(py, &polars_df, &custom_checks)?);
+            .extend(run_custom_checks(py, &polars_df, custom_checks)?);
         if report.is_valid() {
             Ok(None)
         } else {
@@ -2063,9 +2106,10 @@ impl PySchema {
 
     #[pyo3(signature = (n=10, seed=None))]
     fn sample(&self, py: Python<'_>, n: usize, seed: Option<u64>) -> PyResult<PyDataFrame> {
-        let (rust_schema, _) = self.core_schema(py)?;
+        let resolution = self.resolution(py)?;
+        let rust_schema = &resolution.as_ref().expect("cached above").schema;
         let seed = seed.unwrap_or_else(rand::random::<u64>);
-        let frame = framelaw_core::generate::sample(&rust_schema, n, seed)
+        let frame = framelaw_core::generate::sample(rust_schema, n, seed)
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         Ok(PyDataFrame(frame))
     }
@@ -2086,6 +2130,8 @@ impl PyColumnRef {
             .find(|(name, _)| name == &self.name)
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(self.name.clone()))?;
         column.checks.push(check);
+        // Drop the cached resolution; it re-builds lazily on the next use.
+        schema.resolution = Mutex::new(None);
         Ok(())
     }
 }
@@ -2097,13 +2143,31 @@ impl PyColumnRef {
 fn failing_rows(mask: &BooleanChunked, max_rows: usize) -> (Vec<usize>, usize) {
     let mut rows = Vec::new();
     let mut total = 0usize;
-    for (index, value) in mask.iter().enumerate() {
-        if value == Some(false) {
-            total += 1;
-            if rows.len() < max_rows {
-                rows.push(index);
+    let mut base = 0usize;
+    for chunk in mask.downcast_iter() {
+        let has_nulls = chunk
+            .validity()
+            .is_some_and(|bitmap| bitmap.unset_bits() > 0);
+        if has_nulls {
+            for (offset, value) in chunk.iter().enumerate() {
+                if value == Some(false) {
+                    total += 1;
+                    if rows.len() < max_rows {
+                        rows.push(base + offset);
+                    }
+                }
+            }
+        } else {
+            for (offset, value) in chunk.values_iter().enumerate() {
+                if !value {
+                    total += 1;
+                    if rows.len() < max_rows {
+                        rows.push(base + offset);
+                    }
+                }
             }
         }
+        base += chunk.len();
     }
     (rows, total)
 }
