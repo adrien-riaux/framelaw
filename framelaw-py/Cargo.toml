@@ -1,6 +1,6 @@
 [package]
 name = "framelaw-py"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 description = "Native Rust schema validation for Polars DataFrames"
 license = "MIT"

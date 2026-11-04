@@ -1027,12 +1027,9 @@ def test_check_constructors_live_in_scoped_namespaces() -> None:
     assert isinstance(fl.checks.table.eq_columns("a", "b"), fl.DataFrameCheck)
 
 
-def test_top_level_check_aliases_emit_deprecation_warning() -> None:
-    """Legacy top-level names keep working but point at the new namespace."""
-    with pytest.warns(DeprecationWarning, match="checks.column.gt"):
-        column_check = fl.gt(0)
-    assert isinstance(column_check, fl.Check)
-
-    with pytest.warns(DeprecationWarning, match="checks.table.lt_column"):
-        table_check = fl.lt_column("start", "end")
-    assert isinstance(table_check, fl.DataFrameCheck)
+def test_flat_top_level_check_aliases_are_removed() -> None:
+    """Legacy flat check names are gone; use the scoped namespaces."""
+    assert "gt" not in fl.__all__
+    assert not hasattr(fl, "gt")
+    assert "lt_column" not in fl.__all__
+    assert not hasattr(fl, "lt_column")

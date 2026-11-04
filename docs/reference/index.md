@@ -81,15 +81,3 @@ See [Table checks](table-checks.md) for full signatures and semantics.
 | [`infer_schema(df)`](functions.md#framelaw.infer_schema) | Draft a schema from a DataFrame or LazyFrame |
 | [`sample(schema, n=10, seed=None)`](functions.md#framelaw.sample) | Generate a valid frame from a schema |
 | [`framelaw.__version__`](functions.md#framelaw__version__) | Installed distribution version |
-
-## Deprecated aliases
-
-The flat top-level names from before 0.3 (`fl.gt`, `fl.lt_column`, …) still
-work but emit `DeprecationWarning`. They forward to the scoped namespaces:
-
-```python
-fl.gt(0)                 # deprecated; use fl.checks.column.gt(0)
-fl.lt_column("a", "b")   # deprecated; use fl.checks.table.lt_column("a", "b")
-```
-
-`infer_schema` and `sample` were always top-level and remain there.

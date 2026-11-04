@@ -88,9 +88,9 @@ Length constraints on `list` fields are mapped to `list_len_between`.
 Pydantic v2 only. Framelaw reads `__pydantic_core_schema__` directly; v1
 models do not expose that structure.
 
-## Why do I get a `DeprecationWarning` for `fl.gt(...)`?
+## Where did `fl.gt(...)` go?
 
-The flat top-level check names were deprecated in 0.3. Use the scoped
+The flat top-level check names were removed in 0.6.0. Use the scoped
 namespaces:
 
 ```python

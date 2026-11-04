@@ -3,6 +3,15 @@
 All notable changes to Framelaw are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] — 2026-11-04
+
+### Removed
+
+- Removed the deprecated flat top-level check aliases (`framelaw.gt`,
+  `framelaw.lt_column`, …). Use `framelaw.checks.column` for single-column
+  checks and `framelaw.checks.table` for cross-column checks. `infer_schema`
+  and `sample` remain top-level.
+
 ## [0.5.1] — 2026-11-04
 
 ### Added
