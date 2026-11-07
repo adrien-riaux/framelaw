@@ -150,18 +150,3 @@ schema = fl.Schema(
 ```
 
 See [Cross-column checks](cross-column-checks.md).
-
-## Migrate from the flat check API
-
-Before 0.3, checks were imported directly from `framelaw`. The old names still
-work but emit `DeprecationWarning`:
-
-```python
-# Deprecated:
-fl.gt(0)
-
-# Preferred:
-fl.checks.column.gt(0)
-```
-
-Table checks follow the same pattern: `fl.checks.table.lt_column(...)`.
